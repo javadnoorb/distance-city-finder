@@ -8,6 +8,7 @@ const EARTH_RADIUS_MILES = 3958.7613;
 const form = document.getElementById('search-form');
 const locationInput = document.getElementById('location');
 const detectLocationButton = document.getElementById('detect-location');
+const locationSuggestions = document.getElementById('location-suggestions');
 const distanceInput = document.getElementById('distance');
 const marginInput = document.getElementById('margin');
 const statusElement = document.getElementById('status');
@@ -23,13 +24,22 @@ const distanceFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 1,
 });
 
+const MAX_CITY_SUGGESTIONS = 8;
+
 let cityDataPromise;
 let detectedLocation = null;
+let citySearchIndexPromise;
+let latestSuggestionRequest = 0;
+
+locationInput.addEventListener('focus', () => {
+  void updateLocationSuggestions();
+});
 
 locationInput.addEventListener('input', () => {
   if (locationInput.dataset.useDetectedLocation === 'true') {
     clearDetectedLocation();
   }
+  void updateLocationSuggestions();
 });
 
 detectLocationButton.addEventListener('click', async () => {
@@ -43,6 +53,7 @@ detectLocationButton.addEventListener('click', async () => {
     detectedLocation = origin;
     locationInput.dataset.useDetectedLocation = 'true';
     locationInput.value = `${origin.latitude.toFixed(5)},${origin.longitude.toFixed(5)}`;
+    clearLocationSuggestions();
     statusElement.textContent = 'Current location detected. Ready to search.';
   } catch (error) {
     statusElement.textContent = '';
@@ -64,9 +75,10 @@ form.addEventListener('submit', async (event) => {
   try {
     const desiredDistance = parseNumber(distanceInput.value, 'Desired distance');
     const margin = parseNumber(marginInput.value, 'Margin of error');
-    const cities = await loadCities();
+    const [cities, citySearchIndex] = await Promise.all([loadCities(), loadCitySearchIndex()]);
     const useDetectedLocation = locationInput.dataset.useDetectedLocation === 'true' && detectedLocation;
-    const origin = useDetectedLocation ? detectedLocation : await resolveLocation(locationInput.value.trim(), cities);
+    const origin = await resolveLocation(locationInput.value.trim(), citySearchIndex);
+    const resolvedOrigin = useDetectedLocation ? detectedLocation : origin;
     const lowerBound = Math.max(0, desiredDistance - margin);
     const upperBound = desiredDistance + margin;
 
@@ -81,7 +93,7 @@ form.addEventListener('submit', async (event) => {
     }
 
     matches.sort((left, right) => right.city[POPULATION_INDEX] - left.city[POPULATION_INDEX]);
-    renderResults(matches, origin.label, lowerBound, upperBound);
+    renderResults(matches, resolvedOrigin.label, lowerBound, upperBound);
     statusElement.textContent = `Search complete. Found ${matches.length} matching ${matches.length === 1 ? 'city' : 'cities'}.`;
   } catch (error) {
     statusElement.textContent = '';
@@ -154,6 +166,19 @@ async function loadCities() {
   return cityDataPromise;
 }
 
+async function loadCitySearchIndex() {
+  if (!citySearchIndexPromise) {
+    citySearchIndexPromise = loadCities()
+      .then((cities) => buildCitySearchIndex(cities))
+      .catch((error) => {
+        citySearchIndexPromise = undefined;
+        throw error;
+      });
+  }
+
+  return citySearchIndexPromise;
+}
+
 function parseNumber(value, label) {
   const number = Number.parseFloat(value);
   if (!Number.isFinite(number) || number < 0) {
@@ -162,7 +187,40 @@ function parseNumber(value, label) {
   return number;
 }
 
-async function resolveLocation(input, cities) {
+async function updateLocationSuggestions() {
+  const requestId = ++latestSuggestionRequest;
+  const input = locationInput.value.trim();
+
+  if (!input || looksLikeCoordinates(input)) {
+    clearLocationSuggestions();
+    return;
+  }
+
+  try {
+    const citySearchIndex = await loadCitySearchIndex();
+    if (requestId !== latestSuggestionRequest) {
+      return;
+    }
+
+    renderLocationSuggestions(findCitySuggestions(input, citySearchIndex, MAX_CITY_SUGGESTIONS));
+  } catch {
+    if (requestId === latestSuggestionRequest) {
+      clearLocationSuggestions();
+    }
+  }
+}
+
+function renderLocationSuggestions(suggestions) {
+  locationSuggestions.innerHTML = suggestions
+    .map((suggestion) => `<option value="${escapeHtml(suggestion.label)}"></option>`)
+    .join('');
+}
+
+function clearLocationSuggestions() {
+  locationSuggestions.innerHTML = '';
+}
+
+async function resolveLocation(input, citySearchIndex) {
   if (!input) {
     throw new Error('Location is required.');
   }
@@ -176,7 +234,7 @@ async function resolveLocation(input, cities) {
     };
   }
 
-  const localMatch = findCityMatch(input, cities);
+  const localMatch = findCityMatch(input, citySearchIndex);
   if (localMatch) {
     return localMatch;
   }
@@ -230,44 +288,181 @@ function parseCoordinates(input) {
   return { latitude, longitude };
 }
 
-function findCityMatch(input, cities) {
-  const [namePart, countryPart] = input.split(',').map((part) => part.trim()).filter(Boolean);
-  const normalizedQuery = normalizeText(namePart || input);
-  const normalizedCountry = countryPart ? normalizeText(countryPart) : '';
+function looksLikeCoordinates(input) {
+  return /^\s*-?\d+(?:\.\d+)?\s*,\s*-?\d*(?:\.\d+)?\s*$/.test(input);
+}
 
-  let fallbackMatch = null;
+function buildCitySearchIndex(cities) {
+  const entriesByLabel = new Map();
 
   for (const city of cities) {
     const cityName = city[CITY_NAME_INDEX];
     const countryCode = city[COUNTRY_INDEX];
-    const normalizedCityName = normalizeText(cityName);
-    const cityMatchesQuery =
-      normalizedCityName === normalizedQuery ||
-      normalizedCityName.startsWith(normalizedQuery) ||
-      normalizedCityName.includes(` ${normalizedQuery}`);
+    const label = `${cityName}, ${countryCode}`;
+    const entry = entriesByLabel.get(label);
 
-    if (!cityMatchesQuery) {
+    if (entry && entry.population >= city[POPULATION_INDEX]) {
       continue;
     }
 
-    if (!fallbackMatch) {
-      fallbackMatch = {
-        label: `${cityName}, ${countryCode}`,
-        latitude: city[LATITUDE_INDEX],
-        longitude: city[LONGITUDE_INDEX],
-      };
-    }
+    entriesByLabel.set(label, {
+      label,
+      population: city[POPULATION_INDEX],
+      latitude: city[LATITUDE_INDEX],
+      longitude: city[LONGITUDE_INDEX],
+      normalizedCityName: normalizeText(cityName),
+      normalizedCountry: normalizeText(countryCode),
+      normalizedLabel: normalizeText(label),
+    });
+  }
 
-    if (!normalizedCountry || normalizeText(countryCode) === normalizedCountry) {
-      return {
-        label: `${cityName}, ${countryCode}`,
-        latitude: city[LATITUDE_INDEX],
-        longitude: city[LONGITUDE_INDEX],
-      };
+  const entries = Array.from(entriesByLabel.values());
+  const buckets = new Map();
+
+  for (const entry of entries) {
+    const prefixes = collectSearchPrefixes(entry);
+    for (const prefix of prefixes) {
+      const bucket = buckets.get(prefix);
+      if (bucket) {
+        bucket.push(entry);
+      } else {
+        buckets.set(prefix, [entry]);
+      }
     }
   }
 
-  return fallbackMatch;
+  return { entries, buckets };
+}
+
+function collectSearchPrefixes(entry) {
+  const prefixes = new Set();
+  const addPrefixes = (value) => {
+    for (let length = 1; length <= Math.min(3, value.length); length += 1) {
+      prefixes.add(value.slice(0, length));
+    }
+  };
+
+  addPrefixes(entry.normalizedCityName);
+  addPrefixes(entry.normalizedCountry);
+
+  for (const token of entry.normalizedCityName.split(/\s+/)) {
+    addPrefixes(token);
+  }
+
+  return prefixes;
+}
+
+function findCitySuggestions(input, citySearchIndex, limit = 1) {
+  const { normalizedQuery, normalizedCountry } = parseLocationQuery(input);
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const bucketKey = normalizedQuery.slice(0, Math.min(3, normalizedQuery.length));
+  const candidates = citySearchIndex.buckets.get(bucketKey) || citySearchIndex.entries;
+  const suggestions = [];
+
+  for (const entry of candidates) {
+    const score = scoreCityMatch(entry, normalizedQuery, normalizedCountry);
+    if (!Number.isFinite(score)) {
+      continue;
+    }
+
+    insertRankedSuggestion(suggestions, entry, score, limit);
+  }
+
+  return suggestions.map((suggestion) => suggestion.entry);
+}
+
+function findCityMatch(input, citySearchIndex) {
+  const [match] = findCitySuggestions(input, citySearchIndex, 1);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    label: match.label,
+    latitude: match.latitude,
+    longitude: match.longitude,
+  };
+}
+
+function parseLocationQuery(input) {
+  const [namePart, ...countryParts] = input
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  return {
+    normalizedQuery: normalizeText(namePart || input),
+    normalizedCountry: normalizeText(countryParts.join(' ')),
+  };
+}
+
+function scoreCityMatch(entry, normalizedQuery, normalizedCountry) {
+  let score = Number.POSITIVE_INFINITY;
+
+  if (entry.normalizedCityName === normalizedQuery) {
+    score = 0;
+  } else if (entry.normalizedLabel === normalizeText(`${normalizedQuery}, ${normalizedCountry}`)) {
+    score = 0;
+  } else if (entry.normalizedCityName.startsWith(normalizedQuery)) {
+    score = 1;
+  } else if (entry.normalizedCityName.includes(` ${normalizedQuery}`)) {
+    score = 2;
+  } else if (entry.normalizedLabel.startsWith(normalizedQuery)) {
+    score = 3;
+  } else if (
+    entry.normalizedLabel.includes(` ${normalizedQuery}`) ||
+    entry.normalizedLabel.includes(`, ${normalizedQuery}`)
+  ) {
+    score = 4;
+  }
+
+  if (!Number.isFinite(score)) {
+    return score;
+  }
+
+  if (!normalizedCountry) {
+    return score;
+  }
+
+  if (entry.normalizedCountry === normalizedCountry) {
+    return score - 0.5;
+  }
+
+  if (entry.normalizedCountry.startsWith(normalizedCountry)) {
+    return score + 0.25;
+  }
+
+  return Number.POSITIVE_INFINITY;
+}
+
+function insertRankedSuggestion(suggestions, entry, score, limit) {
+  const candidate = { entry, score };
+  let index = suggestions.findIndex((suggestion) => compareRankedSuggestions(candidate, suggestion) < 0);
+
+  if (index === -1) {
+    index = suggestions.length;
+  }
+
+  suggestions.splice(index, 0, candidate);
+
+  if (suggestions.length > limit) {
+    suggestions.length = limit;
+  }
+}
+
+function compareRankedSuggestions(left, right) {
+  if (left.score !== right.score) {
+    return left.score - right.score;
+  }
+
+  if (left.entry.population !== right.entry.population) {
+    return right.entry.population - left.entry.population;
+  }
+
+  return left.entry.label.localeCompare(right.entry.label);
 }
 
 function haversineMiles(latitudeA, longitudeA, latitudeB, longitudeB) {
