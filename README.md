@@ -5,6 +5,7 @@ A small GitHub Pages app that finds cities in a distance ring around a user-supp
 ## How it works
 
 - Enter a location as a city name, an optional city + country code, or as `latitude,longitude`
+- Or use the **Use current location** button to auto-fill your coordinates from your browser
 - Enter a desired distance in miles
 - Optionally adjust the margin of error, which defaults to 20 miles
 - The app finds cities whose distances fall within `distance ± margin`

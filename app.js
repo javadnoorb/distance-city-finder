@@ -7,6 +7,7 @@ const EARTH_RADIUS_MILES = 3958.7613;
 
 const form = document.getElementById('search-form');
 const locationInput = document.getElementById('location');
+const detectLocationButton = document.getElementById('detect-location');
 const distanceInput = document.getElementById('distance');
 const marginInput = document.getElementById('margin');
 const statusElement = document.getElementById('status');
@@ -23,6 +24,34 @@ const distanceFormatter = new Intl.NumberFormat('en-US', {
 });
 
 let cityDataPromise;
+let detectedLocation = null;
+
+locationInput.addEventListener('input', () => {
+  if (locationInput.dataset.useDetectedLocation === 'true') {
+    clearDetectedLocation();
+  }
+});
+
+detectLocationButton.addEventListener('click', async () => {
+  errorElement.textContent = '';
+  statusElement.textContent = 'Detecting your current location...';
+  detectLocationButton.disabled = true;
+  submitButton.disabled = true;
+
+  try {
+    const origin = await detectCurrentLocation();
+    detectedLocation = origin;
+    locationInput.dataset.useDetectedLocation = 'true';
+    locationInput.value = `${origin.latitude.toFixed(5)},${origin.longitude.toFixed(5)}`;
+    statusElement.textContent = 'Current location detected. Ready to search.';
+  } catch (error) {
+    statusElement.textContent = '';
+    errorElement.textContent = error.message || 'Unable to detect current location.';
+  } finally {
+    detectLocationButton.disabled = false;
+    submitButton.disabled = false;
+  }
+});
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -36,7 +65,8 @@ form.addEventListener('submit', async (event) => {
     const desiredDistance = parseNumber(distanceInput.value, 'Desired distance');
     const margin = parseNumber(marginInput.value, 'Margin of error');
     const cities = await loadCities();
-    const origin = await resolveLocation(locationInput.value.trim(), cities);
+    const useDetectedLocation = locationInput.dataset.useDetectedLocation === 'true' && detectedLocation;
+    const origin = useDetectedLocation ? detectedLocation : await resolveLocation(locationInput.value.trim(), cities);
     const lowerBound = Math.max(0, desiredDistance - margin);
     const upperBound = desiredDistance + margin;
 
@@ -61,6 +91,50 @@ form.addEventListener('submit', async (event) => {
     submitButton.disabled = false;
   }
 });
+
+function clearDetectedLocation() {
+  detectedLocation = null;
+  delete locationInput.dataset.useDetectedLocation;
+}
+
+async function detectCurrentLocation() {
+  if (!navigator.geolocation) {
+    throw new Error('Geolocation is not supported by this browser.');
+  }
+
+  const position = await new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 300000,
+    });
+  }).catch((error) => {
+    if (error && typeof error.code === 'number') {
+      if (error.code === 1) {
+        throw new Error('Location access was denied. Allow access and try again.');
+      }
+      if (error.code === 2) {
+        throw new Error('Current location is unavailable right now.');
+      }
+      if (error.code === 3) {
+        throw new Error('Location request timed out. Try again.');
+      }
+    }
+    throw new Error('Unable to detect current location.');
+  });
+
+  const latitude = Number(position?.coords?.latitude);
+  const longitude = Number(position?.coords?.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    throw new Error('Detected location coordinates are invalid.');
+  }
+
+  return {
+    label: 'your current location',
+    latitude,
+    longitude,
+  };
+}
 
 async function loadCities() {
   if (!cityDataPromise) {

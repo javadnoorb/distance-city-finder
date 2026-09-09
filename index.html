@@ -18,13 +18,16 @@
         <form id="search-form" class="search-form">
           <label>
             <span>Your location</span>
-            <input
-              id="location"
-              name="location"
-              type="text"
-              placeholder="City name, optional country code, or latitude,longitude"
-              required
-            />
+            <div class="location-input-row">
+              <input
+                id="location"
+                name="location"
+                type="text"
+                placeholder="City name, optional country code, or latitude,longitude"
+                required
+              />
+              <button id="detect-location" type="button" class="secondary-button">Use current location</button>
+            </div>
           </label>
 
           <div class="field-row">
