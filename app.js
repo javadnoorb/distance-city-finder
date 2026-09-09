@@ -36,11 +36,19 @@ locationInput.addEventListener('focus', () => {
 });
 
 locationInput.addEventListener('input', () => {
+  handleLocationInputChange();
+});
+
+locationInput.addEventListener('change', () => {
+  handleLocationInputChange();
+});
+
+function handleLocationInputChange() {
   if (locationInput.dataset.useDetectedLocation === 'true') {
     clearDetectedLocation();
   }
   void updateLocationSuggestions();
-});
+}
 
 detectLocationButton.addEventListener('click', async () => {
   errorElement.textContent = '';
@@ -77,8 +85,9 @@ form.addEventListener('submit', async (event) => {
     const margin = parseNumber(marginInput.value, 'Margin of error');
     const [cities, citySearchIndex] = await Promise.all([loadCities(), loadCitySearchIndex()]);
     const useDetectedLocation = locationInput.dataset.useDetectedLocation === 'true' && detectedLocation;
-    const origin = await resolveLocation(locationInput.value.trim(), citySearchIndex);
-    const resolvedOrigin = useDetectedLocation ? detectedLocation : origin;
+    const resolvedOrigin = useDetectedLocation
+      ? detectedLocation
+      : await resolveLocation(locationInput.value.trim(), citySearchIndex);
     const lowerBound = Math.max(0, desiredDistance - margin);
     const upperBound = desiredDistance + margin;
 
@@ -86,7 +95,12 @@ form.addEventListener('submit', async (event) => {
 
     const matches = [];
     for (const city of cities) {
-      const distance = haversineMiles(origin.latitude, origin.longitude, city[LATITUDE_INDEX], city[LONGITUDE_INDEX]);
+      const distance = haversineMiles(
+        resolvedOrigin.latitude,
+        resolvedOrigin.longitude,
+        city[LATITUDE_INDEX],
+        city[LONGITUDE_INDEX],
+      );
       if (distance >= lowerBound && distance <= upperBound) {
         matches.push({ city, distance });
       }
