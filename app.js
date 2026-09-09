@@ -15,6 +15,9 @@ const statusElement = document.getElementById('status');
 const errorElement = document.getElementById('error');
 const resultsPanel = document.getElementById('results-panel');
 const resultsSummary = document.getElementById('results-summary');
+const resultsMapSection = document.getElementById('results-map-section');
+const resultsMapSummary = document.getElementById('results-map-summary');
+const resultsMapElement = document.getElementById('results-map');
 const resultsBody = document.getElementById('results-body');
 const submitButton = form.querySelector('button[type="submit"]');
 
@@ -107,7 +110,7 @@ form.addEventListener('submit', async (event) => {
     }
 
     matches.sort((left, right) => right.city[POPULATION_INDEX] - left.city[POPULATION_INDEX]);
-    renderResults(matches, resolvedOrigin.label, lowerBound, upperBound);
+    renderResults(matches, resolvedOrigin, lowerBound, upperBound);
     statusElement.textContent = `Search complete. Found ${matches.length} matching ${matches.length === 1 ? 'city' : 'cities'}.`;
   } catch (error) {
     statusElement.textContent = '';
@@ -496,12 +499,13 @@ function toRadians(value) {
   return (value * Math.PI) / 180;
 }
 
-function renderResults(matches, originLabel, lowerBound, upperBound) {
+function renderResults(matches, origin, lowerBound, upperBound) {
   resultsPanel.hidden = false;
-  resultsSummary.textContent = `${matches.length} ${matches.length === 1 ? 'city' : 'cities'} between ${distanceFormatter.format(lowerBound)} and ${distanceFormatter.format(upperBound)} miles from ${originLabel}.`;
+  resultsSummary.textContent = `${matches.length} ${matches.length === 1 ? 'city' : 'cities'} between ${distanceFormatter.format(lowerBound)} and ${distanceFormatter.format(upperBound)} miles from ${origin.label}.`;
 
   if (matches.length === 0) {
     resultsBody.innerHTML = '<tr><td colspan="4">No cities found for that distance ring.</td></tr>';
+    hideResultsMap();
     return;
   }
 
@@ -515,6 +519,154 @@ function renderResults(matches, originLabel, lowerBound, upperBound) {
   `);
 
   resultsBody.innerHTML = rows.join('');
+  renderResultsMap(matches.slice(0, 5), origin);
+}
+
+function renderResultsMap(topMatches, origin) {
+  if (topMatches.length === 0) {
+    hideResultsMap();
+    return;
+  }
+
+  resultsMapSection.hidden = false;
+  resultsMapSummary.textContent = `Showing the ${topMatches.length} largest ${topMatches.length === 1 ? 'city' : 'cities'} from these results.`;
+  const points = [
+    {
+      kind: 'origin',
+      label: origin.label,
+      latitude: origin.latitude,
+      longitude: origin.longitude,
+    },
+    ...topMatches.map(({ city, distance }, index) => ({
+      kind: 'city',
+      rank: index + 1,
+      label: city[CITY_NAME_INDEX],
+      country: city[COUNTRY_INDEX],
+      population: city[POPULATION_INDEX],
+      distance,
+      latitude: city[LATITUDE_INDEX],
+      longitude: city[LONGITUDE_INDEX],
+    })),
+  ];
+
+  const { minLatitude, maxLatitude, minLongitude, maxLongitude } = calculateMapBounds(points);
+  const gridSteps = 4;
+  const gridLines = [];
+  const pointMarkers = [];
+  const legendItems = [];
+
+  for (let step = 0; step <= gridSteps; step += 1) {
+    const x = (step / gridSteps) * 100;
+    const y = (step / gridSteps) * 100;
+    const longitude = minLongitude + ((maxLongitude - minLongitude) * step) / gridSteps;
+    const latitude = maxLatitude - ((maxLatitude - minLatitude) * step) / gridSteps;
+
+    gridLines.push(`
+      <line x1="${x}%" y1="0%" x2="${x}%" y2="100%"></line>
+      <line x1="0%" y1="${y}%" x2="100%" y2="${y}%"></line>
+      <text x="${Math.min(x + 1.2, 96)}%" y="97%">${formatCoordinate(longitude, 'longitude')}</text>
+      <text x="1.5%" y="${Math.max(y - 1.5, 6)}%">${formatCoordinate(latitude, 'latitude')}</text>
+    `);
+  }
+
+  points.forEach((point) => {
+    const x = projectLongitude(point.longitude, minLongitude, maxLongitude);
+    const y = projectLatitude(point.latitude, minLatitude, maxLatitude);
+
+    if (point.kind === 'origin') {
+      pointMarkers.push(`
+        <g class="map-point map-point-origin">
+          <circle cx="${x}%" cy="${y}%" r="10"></circle>
+          <circle cx="${x}%" cy="${y}%" r="4"></circle>
+          <text x="${clampPercentage(x + 2.5)}%" y="${clampPercentage(y - 3)}%">Origin</text>
+        </g>
+      `);
+      legendItems.push(`
+        <li class="map-legend-item map-legend-origin">
+          <span class="map-legend-swatch" aria-hidden="true"></span>
+          <span>${escapeHtml(point.label)}</span>
+        </li>
+      `);
+      return;
+    }
+
+    pointMarkers.push(`
+      <g class="map-point map-point-city">
+        <circle cx="${x}%" cy="${y}%" r="11"></circle>
+        <text x="${x}%" y="${y}%">${point.rank}</text>
+        <title>#${point.rank} ${escapeHtml(point.label)}, ${escapeHtml(point.country)} — Population ${populationFormatter.format(point.population)} — ${distanceFormatter.format(point.distance)} miles away</title>
+      </g>
+    `);
+    legendItems.push(`
+      <li class="map-legend-item">
+        <span class="map-legend-rank" aria-hidden="true">${point.rank}</span>
+        <span>${escapeHtml(point.label)}, ${escapeHtml(point.country)} · Pop. ${populationFormatter.format(point.population)} · ${distanceFormatter.format(point.distance)} mi</span>
+      </li>
+    `);
+  });
+
+  resultsMapElement.innerHTML = `
+    <div class="results-map-canvas">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <rect x="0" y="0" width="100" height="100" rx="4" ry="4"></rect>
+        <g class="map-grid">${gridLines.join('')}</g>
+        ${pointMarkers.join('')}
+      </svg>
+    </div>
+    <ul class="map-legend" aria-label="Top matching cities">${legendItems.join('')}</ul>
+  `;
+}
+
+function hideResultsMap() {
+  resultsMapSection.hidden = true;
+  resultsMapSummary.textContent = '';
+  resultsMapElement.innerHTML = '';
+}
+
+function calculateMapBounds(points) {
+  const latitudes = points.map((point) => point.latitude);
+  const longitudes = points.map((point) => point.longitude);
+  const latitudePadding = Math.max(4, (Math.max(...latitudes) - Math.min(...latitudes)) * 0.2 || 4);
+  const longitudePadding = Math.max(6, (Math.max(...longitudes) - Math.min(...longitudes)) * 0.2 || 6);
+
+  return {
+    minLatitude: clampLatitude(Math.min(...latitudes) - latitudePadding),
+    maxLatitude: clampLatitude(Math.max(...latitudes) + latitudePadding),
+    minLongitude: clampLongitude(Math.min(...longitudes) - longitudePadding),
+    maxLongitude: clampLongitude(Math.max(...longitudes) + longitudePadding),
+  };
+}
+
+function projectLongitude(longitude, minLongitude, maxLongitude) {
+  return 8 + (((longitude - minLongitude) / (maxLongitude - minLongitude || 1)) * 84);
+}
+
+function projectLatitude(latitude, minLatitude, maxLatitude) {
+  return 10 + (((maxLatitude - latitude) / (maxLatitude - minLatitude || 1)) * 80);
+}
+
+function clampLatitude(value) {
+  return Math.min(90, Math.max(-90, value));
+}
+
+function clampLongitude(value) {
+  return Math.min(180, Math.max(-180, value));
+}
+
+function clampPercentage(value) {
+  return Math.min(95, Math.max(5, value));
+}
+
+function formatCoordinate(value, axis) {
+  const direction =
+    axis === 'latitude'
+      ? value >= 0
+        ? 'N'
+        : 'S'
+      : value >= 0
+        ? 'E'
+        : 'W';
+  return `${Math.abs(value).toFixed(1)}°${direction}`;
 }
 
 function escapeHtml(value) {
