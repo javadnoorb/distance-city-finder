@@ -22,9 +22,11 @@
               id="location"
               name="location"
               type="text"
+              list="location-suggestions"
               placeholder="City name, optional country code, or latitude,longitude"
               required
             />
+            <datalist id="location-suggestions"></datalist>
           </label>
 
           <div class="field-row">
@@ -50,7 +52,7 @@
           <button type="submit">Find cities</button>
         </form>
 
-        <p class="hint">Tip: try <code>Chicago</code>, <code>Paris, FR</code>, or coordinates like <code>41.8781,-87.6298</code>.</p>
+        <p class="hint">Tip: try <code>Chicago</code>, <code>Paris, FR</code>, or coordinates like <code>41.8781,-87.6298</code>. City suggestions appear as you type.</p>
         <p id="status" class="status" aria-live="polite"></p>
         <p id="error" class="error" aria-live="assertive"></p>
       </section>
