@@ -12,7 +12,7 @@ A small GitHub Pages app that finds cities in a distance ring around a user-supp
 
 ## Data source
 
-City data comes from the MIT-licensed [`all-the-cities`](https://www.npmjs.com/package/all-the-cities) dataset and includes cities with population data and coordinates.
+City data comes from the MIT-licensed [`all-the-cities`](https://www.npmjs.com/package/all-the-cities) dataset and includes cities with population data and coordinates. See [`THIRD_PARTY_NOTICES`](./THIRD_PARTY_NOTICES) for required third-party license notices.
 
 ## Local usage
 
@@ -21,7 +21,7 @@ Because the app loads a JSON file in the browser, serve the repository with a si
 For example:
 
 ```bash
-cd /home/runner/work/distance-city-finder/distance-city-finder
+cd /path/to/distance-city-finder
 python3 -m http.server 8000
 ```
 
