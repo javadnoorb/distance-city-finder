@@ -10,7 +10,7 @@ A small GitHub Pages app that finds cities in a distance ring around a user-supp
 - Enter a desired distance in miles
 - Optionally adjust the margin of error, which defaults to 20 miles
 - The app finds cities whose distances fall within `distance ± margin`
-- Results are shown in descending population order
+- Results are shown in descending population order, with the top five matches plotted on a map
 
 ## Data source
 

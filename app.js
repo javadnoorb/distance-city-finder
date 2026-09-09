@@ -15,6 +15,9 @@ const statusElement = document.getElementById('status');
 const errorElement = document.getElementById('error');
 const resultsPanel = document.getElementById('results-panel');
 const resultsSummary = document.getElementById('results-summary');
+const resultsMapSection = document.getElementById('results-map-section');
+const resultsMapSummary = document.getElementById('results-map-summary');
+const resultsMapElement = document.getElementById('results-map');
 const resultsBody = document.getElementById('results-body');
 const submitButton = form.querySelector('button[type="submit"]');
 
@@ -30,6 +33,8 @@ let cityDataPromise;
 let detectedLocation = null;
 let citySearchIndexPromise;
 let latestSuggestionRequest = 0;
+let resultsMap;
+let resultsMapLayers;
 
 locationInput.addEventListener('focus', () => {
   void updateLocationSuggestions();
@@ -107,7 +112,7 @@ form.addEventListener('submit', async (event) => {
     }
 
     matches.sort((left, right) => right.city[POPULATION_INDEX] - left.city[POPULATION_INDEX]);
-    renderResults(matches, resolvedOrigin.label, lowerBound, upperBound);
+    renderResults(matches, resolvedOrigin, lowerBound, upperBound);
     statusElement.textContent = `Search complete. Found ${matches.length} matching ${matches.length === 1 ? 'city' : 'cities'}.`;
   } catch (error) {
     statusElement.textContent = '';
@@ -496,12 +501,13 @@ function toRadians(value) {
   return (value * Math.PI) / 180;
 }
 
-function renderResults(matches, originLabel, lowerBound, upperBound) {
+function renderResults(matches, origin, lowerBound, upperBound) {
   resultsPanel.hidden = false;
-  resultsSummary.textContent = `${matches.length} ${matches.length === 1 ? 'city' : 'cities'} between ${distanceFormatter.format(lowerBound)} and ${distanceFormatter.format(upperBound)} miles from ${originLabel}.`;
+  resultsSummary.textContent = `${matches.length} ${matches.length === 1 ? 'city' : 'cities'} between ${distanceFormatter.format(lowerBound)} and ${distanceFormatter.format(upperBound)} miles from ${origin.label}.`;
 
   if (matches.length === 0) {
     resultsBody.innerHTML = '<tr><td colspan="4">No cities found for that distance ring.</td></tr>';
+    hideResultsMap();
     return;
   }
 
@@ -515,6 +521,79 @@ function renderResults(matches, originLabel, lowerBound, upperBound) {
   `);
 
   resultsBody.innerHTML = rows.join('');
+  renderResultsMap(matches.slice(0, 5), origin);
+}
+
+function renderResultsMap(topMatches, origin) {
+  if (!window.L || topMatches.length === 0) {
+    hideResultsMap();
+    return;
+  }
+
+  resultsMapSection.hidden = false;
+  resultsMapSummary.textContent = `Showing the ${topMatches.length} largest ${topMatches.length === 1 ? 'city' : 'cities'} from these results.`;
+
+  if (!resultsMap) {
+    resultsMap = L.map(resultsMapElement, {
+      scrollWheelZoom: false,
+    });
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors',
+    }).addTo(resultsMap);
+
+    resultsMapLayers = L.layerGroup().addTo(resultsMap);
+  }
+
+  resultsMapLayers.clearLayers();
+
+  const bounds = [];
+  L.circleMarker([origin.latitude, origin.longitude], {
+    radius: 7,
+    weight: 2,
+    color: '#1d4ed8',
+    fillColor: '#60a5fa',
+    fillOpacity: 0.95,
+  })
+    .bindPopup(`<strong>Origin</strong><br />${escapeHtml(origin.label)}`)
+    .addTo(resultsMapLayers);
+  bounds.push([origin.latitude, origin.longitude]);
+
+  topMatches.forEach(({ city, distance }, index) => {
+    const latitude = city[LATITUDE_INDEX];
+    const longitude = city[LONGITUDE_INDEX];
+    bounds.push([latitude, longitude]);
+
+    L.marker([latitude, longitude])
+      .bindPopup(
+        `<strong>#${index + 1} ${escapeHtml(city[CITY_NAME_INDEX])}</strong><br />${escapeHtml(city[COUNTRY_INDEX])}<br />Population: ${populationFormatter.format(city[POPULATION_INDEX])}<br />Distance: ${distanceFormatter.format(distance)} miles`,
+      )
+      .addTo(resultsMapLayers);
+  });
+
+  requestAnimationFrame(() => {
+    resultsMap.invalidateSize();
+
+    if (bounds.length === 1) {
+      resultsMap.setView(bounds[0], 6);
+      return;
+    }
+
+    resultsMap.fitBounds(bounds, {
+      padding: [36, 36],
+      maxZoom: 6,
+    });
+  });
+}
+
+function hideResultsMap() {
+  resultsMapSection.hidden = true;
+  resultsMapSummary.textContent = '';
+
+  if (resultsMapLayers) {
+    resultsMapLayers.clearLayers();
+  }
 }
 
 function escapeHtml(value) {

@@ -217,6 +217,37 @@ code {
   background: #f8fafc;
 }
 
+.results-map-section {
+  margin-top: 1rem;
+}
+
+.results-map-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.results-map-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #0f172a;
+}
+
+#results-map-summary {
+  color: #475569;
+}
+
+.results-map {
+  margin-top: 0.75rem;
+  min-height: 320px;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #dbeafe;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
