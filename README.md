@@ -10,11 +10,13 @@ A small GitHub Pages app that finds cities in a distance ring around a user-supp
 - Enter a desired distance in miles
 - Optionally adjust the margin of error, which defaults to 20 miles
 - The app finds cities whose distances fall within `distance ± margin`
-- Results are shown in descending population order, with the top five matches plotted on a map
+- Results are shown in descending population order, with the top five matches plotted on an interactive map that also shades the search distance ring
 
 ## Data source
 
-City data comes from the MIT-licensed [`all-the-cities`](https://www.npmjs.com/package/all-the-cities) dataset and includes cities with population data and coordinates. See [`THIRD_PARTY_NOTICES`](./THIRD_PARTY_NOTICES) for required third-party license notices.
+City data comes from the MIT-licensed [`all-the-cities`](https://www.npmjs.com/package/all-the-cities) dataset and includes cities with population data and coordinates. The results map uses a bundled copy of [Leaflet](https://leafletjs.com/) (`vendor/leaflet`) with map tiles from [OpenStreetMap](https://www.openstreetmap.org/copyright), so it needs a network connection to show the background map.
+
+See [`THIRD_PARTY_NOTICES`](./THIRD_PARTY_NOTICES) for required third-party license notices.
 
 ## Local usage
 
