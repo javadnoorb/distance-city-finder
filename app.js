@@ -549,37 +549,48 @@ function renderResultsMap(topMatches, origin) {
     })),
   ];
 
+  // Keep every longitude within 180° of the origin so results across the antimeridian stay nearby.
+  points.forEach((point) => {
+    point.mapLongitude = unwrapLongitude(point.longitude, origin.longitude);
+  });
+
   const { minLatitude, maxLatitude, minLongitude, maxLongitude } = calculateMapBounds(points);
   const gridSteps = 4;
   const gridLines = [];
+  const axisLabels = [];
   const pointMarkers = [];
   const legendItems = [];
 
   for (let step = 0; step <= gridSteps; step += 1) {
-    const x = (step / gridSteps) * 100;
-    const y = (step / gridSteps) * 100;
+    const position = (step / gridSteps) * 100;
     const longitude = minLongitude + ((maxLongitude - minLongitude) * step) / gridSteps;
     const latitude = maxLatitude - ((maxLatitude - minLatitude) * step) / gridSteps;
+    const longitudeAlignment = step === 0 ? 'start' : step === gridSteps ? 'end' : 'center';
 
     gridLines.push(`
-      <line x1="${x}%" y1="0%" x2="${x}%" y2="100%"></line>
-      <line x1="0%" y1="${y}%" x2="100%" y2="${y}%"></line>
-      <text x="${Math.min(x + 1.2, 96)}%" y="97%">${formatCoordinate(longitude, 'longitude')}</text>
-      <text x="1.5%" y="${Math.max(y - 1.5, 6)}%">${formatCoordinate(latitude, 'latitude')}</text>
+      <line x1="${position}" y1="0" x2="${position}" y2="100"></line>
+      <line x1="0" y1="${position}" x2="100" y2="${position}"></line>
     `);
+    axisLabels.push(`
+      <span class="map-axis-label map-axis-longitude map-axis-${longitudeAlignment}" style="left: ${position}%">${formatCoordinate(longitude, 'longitude')}</span>
+    `);
+    // The bottom latitude label would collide with the longitude labels, so it is skipped.
+    if (step < gridSteps) {
+      axisLabels.push(`
+        <span class="map-axis-label map-axis-latitude" style="top: ${position}%">${formatCoordinate(latitude, 'latitude')}</span>
+      `);
+    }
   }
 
   points.forEach((point) => {
-    const x = projectLongitude(point.longitude, minLongitude, maxLongitude);
+    const x = projectLongitude(point.mapLongitude, minLongitude, maxLongitude);
     const y = projectLatitude(point.latitude, minLatitude, maxLatitude);
 
     if (point.kind === 'origin') {
       pointMarkers.push(`
-        <g class="map-point map-point-origin">
-          <circle cx="${x}%" cy="${y}%" r="10"></circle>
-          <circle cx="${x}%" cy="${y}%" r="4"></circle>
-          <text x="${clampPercentage(x + 2.5)}%" y="${clampPercentage(y - 3)}%">Origin</text>
-        </g>
+        <div class="map-marker map-marker-origin" style="left: ${x}%; top: ${y}%" data-x="${x}" data-y="${y}">
+          <span class="map-marker-label">Origin</span>
+        </div>
       `);
       legendItems.push(`
         <li class="map-legend-item map-legend-origin">
@@ -591,11 +602,13 @@ function renderResultsMap(topMatches, origin) {
     }
 
     pointMarkers.push(`
-      <g class="map-point map-point-city">
-        <circle cx="${x}%" cy="${y}%" r="11"></circle>
-        <text x="${x}%" y="${y}%">${point.rank}</text>
-        <title>#${point.rank} ${escapeHtml(point.label)}, ${escapeHtml(point.country)} — Population ${populationFormatter.format(point.population)} — ${distanceFormatter.format(point.distance)} miles away</title>
-      </g>
+      <div
+        class="map-marker map-marker-city"
+        style="left: ${x}%; top: ${y}%"
+        data-x="${x}"
+        data-y="${y}"
+        title="#${point.rank} ${escapeHtml(point.label)}, ${escapeHtml(point.country)} — Population ${populationFormatter.format(point.population)} — ${distanceFormatter.format(point.distance)} miles away"
+      >${point.rank}</div>
     `);
     legendItems.push(`
       <li class="map-legend-item">
@@ -608,13 +621,70 @@ function renderResultsMap(topMatches, origin) {
   resultsMapElement.innerHTML = `
     <div class="results-map-canvas">
       <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-        <rect x="0" y="0" width="100" height="100" rx="4" ry="4"></rect>
         <g class="map-grid">${gridLines.join('')}</g>
-        ${pointMarkers.join('')}
       </svg>
+      <div class="map-overlay" aria-hidden="true">
+        ${axisLabels.join('')}
+        ${pointMarkers.join('')}
+      </div>
     </div>
     <ul class="map-legend" aria-label="Top matching cities">${legendItems.join('')}</ul>
   `;
+
+  spreadOverlappingMarkers(resultsMapElement.querySelector('.results-map-canvas'));
+}
+
+// Nudges city markers that would cover an earlier marker, leaving a small dot at the true position.
+function spreadOverlappingMarkers(canvas) {
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (!width || !height) {
+    return;
+  }
+
+  const minimumGap = 28;
+  const placed = [];
+  canvas.querySelectorAll('.map-marker').forEach((marker) => {
+    const x = (Number(marker.dataset.x) / 100) * width;
+    const y = (Number(marker.dataset.y) / 100) * height;
+    const overlaps = (candidate) =>
+      placed.some((other) => Math.hypot(candidate.x - other.x, candidate.y - other.y) < minimumGap);
+
+    let position = { x, y };
+    if (marker.classList.contains('map-marker-city') && overlaps(position)) {
+      const candidates = [];
+      for (let ring = 1; ring <= 3; ring += 1) {
+        for (let index = 0; index < 8; index += 1) {
+          const angle = (index / 8) * 2 * Math.PI;
+          candidates.push({
+            x: x + Math.cos(angle) * minimumGap * ring,
+            y: y + Math.sin(angle) * minimumGap * ring,
+          });
+        }
+      }
+      position =
+        candidates.find(
+          (candidate) =>
+            candidate.x > minimumGap / 2 &&
+            candidate.x < width - minimumGap / 2 &&
+            candidate.y > minimumGap / 2 &&
+            candidate.y < height - minimumGap / 2 &&
+            !overlaps(candidate),
+        ) || position;
+
+      if (position.x !== x || position.y !== y) {
+        const anchor = document.createElement('span');
+        anchor.className = 'map-marker-anchor';
+        anchor.style.left = `${Number(marker.dataset.x)}%`;
+        anchor.style.top = `${Number(marker.dataset.y)}%`;
+        marker.before(anchor);
+        marker.style.left = `${(position.x / width) * 100}%`;
+        marker.style.top = `${(position.y / height) * 100}%`;
+      }
+    }
+
+    placed.push(position);
+  });
 }
 
 function hideResultsMap() {
@@ -625,39 +695,40 @@ function hideResultsMap() {
 
 function calculateMapBounds(points) {
   const latitudes = points.map((point) => point.latitude);
-  const longitudes = points.map((point) => point.longitude);
+  const longitudes = points.map((point) => point.mapLongitude);
   const latitudePadding = Math.max(4, (Math.max(...latitudes) - Math.min(...latitudes)) * 0.2 || 4);
   const longitudePadding = Math.max(6, (Math.max(...longitudes) - Math.min(...longitudes)) * 0.2 || 6);
 
   return {
     minLatitude: clampLatitude(Math.min(...latitudes) - latitudePadding),
     maxLatitude: clampLatitude(Math.max(...latitudes) + latitudePadding),
-    minLongitude: clampLongitude(Math.min(...longitudes) - longitudePadding),
-    maxLongitude: clampLongitude(Math.max(...longitudes) + longitudePadding),
+    minLongitude: Math.min(...longitudes) - longitudePadding,
+    maxLongitude: Math.max(...longitudes) + longitudePadding,
   };
 }
 
 function projectLongitude(longitude, minLongitude, maxLongitude) {
-  return 8 + (((longitude - minLongitude) / (maxLongitude - minLongitude || 1)) * 84);
+  return ((longitude - minLongitude) / (maxLongitude - minLongitude || 1)) * 100;
 }
 
 function projectLatitude(latitude, minLatitude, maxLatitude) {
-  return 10 + (((maxLatitude - latitude) / (maxLatitude - minLatitude || 1)) * 80);
+  return ((maxLatitude - latitude) / (maxLatitude - minLatitude || 1)) * 100;
 }
 
 function clampLatitude(value) {
   return Math.min(90, Math.max(-90, value));
 }
 
-function clampLongitude(value) {
-  return Math.min(180, Math.max(-180, value));
+function unwrapLongitude(longitude, referenceLongitude) {
+  return referenceLongitude + normalizeLongitude(longitude - referenceLongitude);
 }
 
-function clampPercentage(value) {
-  return Math.min(95, Math.max(5, value));
+function normalizeLongitude(value) {
+  return ((((value + 180) % 360) + 360) % 360) - 180;
 }
 
-function formatCoordinate(value, axis) {
+function formatCoordinate(rawValue, axis) {
+  const value = axis === 'longitude' ? normalizeLongitude(rawValue) : rawValue;
   const direction =
     axis === 'latitude'
       ? value >= 0

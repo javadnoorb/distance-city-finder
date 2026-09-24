@@ -248,55 +248,106 @@ code {
 }
 
 .results-map-canvas {
-  min-height: 320px;
-  padding: 0.5rem;
+  position: relative;
+  height: 320px;
   background:
     radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.45), transparent 52%),
     linear-gradient(180deg, #dbeafe 0%, #eff6ff 100%);
 }
 
-.results-map svg {
-  display: block;
+.results-map svg,
+.map-overlay {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  height: 320px;
+  height: 100%;
 }
 
-.results-map rect {
-  fill: transparent;
+.results-map svg {
+  display: block;
 }
 
 .map-grid line {
   stroke: rgba(71, 85, 105, 0.18);
-  stroke-width: 0.35;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
 }
 
-.map-grid text,
-.map-point text {
-  fill: #334155;
-  font-size: 3.2px;
+.map-axis-label {
+  position: absolute;
+  color: #334155;
+  font-size: 0.72rem;
   font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
 }
 
-.map-point-origin circle:first-of-type {
-  fill: rgba(96, 165, 250, 0.28);
-  stroke: #1d4ed8;
-  stroke-width: 0.9;
+.map-axis-longitude {
+  bottom: 6px;
+  transform: translateX(-50%);
 }
 
-.map-point-origin circle:last-of-type {
-  fill: #1d4ed8;
+.map-axis-longitude.map-axis-start {
+  transform: translateX(6px);
 }
 
-.map-point-city circle {
-  fill: #4f46e5;
-  stroke: rgba(255, 255, 255, 0.95);
-  stroke-width: 0.9;
+.map-axis-longitude.map-axis-end {
+  transform: translateX(calc(-100% - 6px));
 }
 
-.map-point-city text {
-  fill: #ffffff;
-  text-anchor: middle;
-  dominant-baseline: central;
+.map-axis-latitude {
+  left: 6px;
+  transform: translateY(5px);
+}
+
+.map-marker,
+.map-marker-anchor {
+  position: absolute;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+}
+
+.map-marker {
+  z-index: 1;
+}
+
+.map-marker-origin {
+  width: 22px;
+  height: 22px;
+  border: 2px solid #1d4ed8;
+  background: radial-gradient(circle, #1d4ed8 0 4px, rgba(96, 165, 250, 0.28) 5px);
+  box-sizing: border-box;
+}
+
+.map-marker-label {
+  position: absolute;
+  left: calc(100% + 4px);
+  top: 50%;
+  transform: translateY(-50%);
+  color: #1e3a8a;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.map-marker-city {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 2px solid rgba(255, 255, 255, 0.95);
+  background: #4f46e5;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.3);
+  box-sizing: border-box;
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  pointer-events: auto;
+}
+
+.map-marker-anchor {
+  width: 6px;
+  height: 6px;
+  background: #4f46e5;
 }
 
 .map-legend {
