@@ -9,6 +9,7 @@ import {
   looksLikeCoordinates,
   normalizeText,
   parseCoordinates,
+  sortMatches,
 } from '../lib/cities.js';
 
 const CITIES = [
@@ -80,4 +81,24 @@ test('matching ignores accents and reports exact matches with score <= 0', () =>
 
   const [prefix] = findRankedCitySuggestions('Pari', index, 1);
   assert.ok(prefix.score > 0);
+});
+
+test('sortMatches sorts by each column in either direction without mutating', () => {
+  const matches = findCitiesInRing(CITIES, CHICAGO, 0, 12000);
+  const names = (sorted) => sorted.map(({ city }) => `${city[0]}, ${city[1]}`);
+
+  assert.deepEqual(names(sortMatches(matches, 'name', 'ascending')).slice(0, 3), ['Chicago, US', 'Memphis, US', 'Paris, FR']);
+  assert.deepEqual(names(sortMatches(matches, 'population', 'ascending')).slice(0, 2), ['Tiny Town, US', 'Parisot, FR']);
+
+  const byDistance = sortMatches(matches, 'distance', 'descending');
+  for (let index = 1; index < byDistance.length; index += 1) {
+    assert.ok(byDistance[index - 1].distance >= byDistance[index].distance);
+  }
+
+  const byCountry = sortMatches(matches, 'country', 'ascending');
+  assert.equal(byCountry[0].city[1], 'BR');
+  // Ties within a country fall back to largest population first.
+  assert.deepEqual(names(byCountry).slice(1, 3), ['Paris, FR', 'Parisot, FR']);
+
+  assert.equal(matches[0].city[0], 'São Paulo');
 });

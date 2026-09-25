@@ -104,10 +104,14 @@
           <table aria-label="Cities matching the selected distance ring">
             <thead>
               <tr>
-                <th>City</th>
-                <th>Country</th>
-                <th>Population</th>
-                <th>Distance (<span class="unit-label">mi</span>)</th>
+                <th data-sort-key="name"><button type="button" class="sort-button">City</button></th>
+                <th data-sort-key="country"><button type="button" class="sort-button">Country</button></th>
+                <th data-sort-key="population" aria-sort="descending">
+                  <button type="button" class="sort-button">Population</button>
+                </th>
+                <th data-sort-key="distance">
+                  <button type="button" class="sort-button"><span>Distance (<span class="unit-label">mi</span>)</span></button>
+                </th>
               </tr>
             </thead>
             <tbody id="results-body"></tbody>

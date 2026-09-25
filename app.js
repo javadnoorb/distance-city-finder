@@ -11,6 +11,8 @@ import {
   findRankedCitySuggestions,
   looksLikeCoordinates,
   parseCoordinates,
+  SORT_KEYS,
+  sortMatches,
 } from './lib/cities.js';
 import { buildDistanceRing, ringEnclosesPole, unwrapLongitude } from './lib/geo.js';
 import { searchFromQueryString, searchToQueryString } from './lib/query.js';
@@ -34,6 +36,7 @@ const resultsMapElement = document.getElementById('results-map');
 const resultsBody = document.getElementById('results-body');
 const showMoreButton = document.getElementById('show-more');
 const copyLinkButton = document.getElementById('copy-link');
+const sortHeaders = document.querySelectorAll('th[data-sort-key]');
 const submitButton = form.querySelector('button[type="submit"]');
 
 const populationFormatter = new Intl.NumberFormat('en-US');
@@ -126,6 +129,14 @@ copyLinkButton.addEventListener('click', async () => {
   } catch {
     statusElement.textContent = 'Copy the link from the address bar to share this search.';
   }
+});
+
+sortHeaders.forEach((header) => {
+  header.querySelector('.sort-button').addEventListener('click', () => {
+    if (currentResults) {
+      sortResults(header.dataset.sortKey);
+    }
+  });
 });
 
 showMoreButton.addEventListener('click', () => {
@@ -394,7 +405,17 @@ async function findLocalCityMatch(input) {
 
 function renderResults(matches, origin, lowerBound, upperBound) {
   resultsPanel.hidden = false;
-  currentResults = { matches, origin, lowerBound, upperBound, shown: 0 };
+  currentResults = {
+    matches,
+    sortedMatches: matches,
+    sortKey: 'population',
+    sortDirection: 'descending',
+    origin,
+    lowerBound,
+    upperBound,
+    shown: 0,
+  };
+  updateSortHeaders();
   resultsBody.innerHTML = '';
 
   if (matches.length === 0) {
@@ -417,13 +438,13 @@ function rerenderResults() {
     return;
   }
 
-  resultsBody.innerHTML = buildResultRows(matches.slice(0, shown));
+  resultsBody.innerHTML = buildResultRows(currentResults.sortedMatches.slice(0, shown));
   renderResultsMap(matches.slice(0, 5), origin, lowerBound, upperBound);
 }
 
 // Appends the next page of rows so very large result sets stay responsive.
 function showMoreResults() {
-  const { matches, shown } = currentResults;
+  const { sortedMatches: matches, shown } = currentResults;
   const nextPage = matches.slice(shown, shown + RESULTS_PAGE_SIZE);
 
   resultsBody.insertAdjacentHTML('beforeend', buildResultRows(nextPage));
@@ -433,6 +454,35 @@ function showMoreResults() {
   showMoreButton.hidden = remaining === 0;
   showMoreButton.textContent = `Show ${populationFormatter.format(Math.min(RESULTS_PAGE_SIZE, remaining))} more`;
   updateResultsSummary();
+}
+
+// Re-sorts the table, keeping the same number of rows visible. Clicking the active column reverses it.
+function sortResults(sortKey) {
+  const sortDirection =
+    currentResults.sortKey === sortKey
+      ? currentResults.sortDirection === 'ascending'
+        ? 'descending'
+        : 'ascending'
+      : SORT_KEYS[sortKey].defaultDirection;
+
+  Object.assign(currentResults, {
+    sortKey,
+    sortDirection,
+    sortedMatches: sortMatches(currentResults.matches, sortKey, sortDirection),
+  });
+  updateSortHeaders();
+  resultsBody.innerHTML = buildResultRows(currentResults.sortedMatches.slice(0, currentResults.shown));
+  updateResultsSummary();
+}
+
+function updateSortHeaders() {
+  sortHeaders.forEach((header) => {
+    if (header.dataset.sortKey === currentResults.sortKey) {
+      header.setAttribute('aria-sort', currentResults.sortDirection);
+    } else {
+      header.removeAttribute('aria-sort');
+    }
+  });
 }
 
 function buildResultRows(matches) {
@@ -449,9 +499,10 @@ function buildResultRows(matches) {
 }
 
 function updateResultsSummary() {
-  const { matches, origin, lowerBound, upperBound, shown } = currentResults;
+  const { matches, origin, lowerBound, upperBound, shown, sortKey } = currentResults;
   const count = `${populationFormatter.format(matches.length)} ${matches.length === 1 ? 'city' : 'cities'}`;
-  const partial = shown < matches.length ? ` Showing the largest ${populationFormatter.format(shown)}.` : '';
+  const which = sortKey === 'population' && currentResults.sortDirection === 'descending' ? 'largest' : 'first';
+  const partial = shown < matches.length ? ` Showing the ${which} ${populationFormatter.format(shown)}.` : '';
   resultsSummary.textContent = `${count} between ${formatDistanceValue(lowerBound)} and ${formatDistanceValue(upperBound)} ${DISTANCE_UNITS[currentUnit].name} from ${origin.label}.${partial}`;
 }
 

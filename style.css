@@ -358,6 +358,49 @@ th {
   color: #475569;
 }
 
+.sort-button {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  width: auto;
+  padding: 0;
+  border-radius: 4px;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.sort-button:hover,
+.sort-button:focus-visible {
+  transform: none;
+  box-shadow: none;
+  filter: none;
+  color: #1d4ed8;
+}
+
+.sort-button:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.sort-button::after {
+  content: '↕';
+  opacity: 0.35;
+}
+
+th[aria-sort='ascending'] .sort-button::after {
+  content: '↑';
+  opacity: 1;
+}
+
+th[aria-sort='descending'] .sort-button::after {
+  content: '↓';
+  opacity: 1;
+}
+
 tbody tr:nth-child(even) {
   background: #f8fafc;
 }
