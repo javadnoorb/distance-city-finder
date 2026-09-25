@@ -209,6 +209,15 @@ code {
   color: #334155;
 }
 
+.show-more-button {
+  display: block;
+  margin: 1rem auto 0;
+}
+
+.show-more-button[hidden] {
+  display: none;
+}
+
 .results-table-wrapper {
   margin-top: 0.9rem;
   overflow-x: auto;
