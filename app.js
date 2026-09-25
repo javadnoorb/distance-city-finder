@@ -11,6 +11,7 @@ const detectLocationButton = document.getElementById('detect-location');
 const locationSuggestions = document.getElementById('location-suggestions');
 const distanceInput = document.getElementById('distance');
 const marginInput = document.getElementById('margin');
+const minPopulationInput = document.getElementById('min-population');
 const statusElement = document.getElementById('status');
 const errorElement = document.getElementById('error');
 const resultsPanel = document.getElementById('results-panel');
@@ -19,6 +20,7 @@ const resultsMapSection = document.getElementById('results-map-section');
 const resultsMapSummary = document.getElementById('results-map-summary');
 const resultsMapElement = document.getElementById('results-map');
 const resultsBody = document.getElementById('results-body');
+const showMoreButton = document.getElementById('show-more');
 const submitButton = form.querySelector('button[type="submit"]');
 
 const populationFormatter = new Intl.NumberFormat('en-US');
@@ -28,12 +30,20 @@ const distanceFormatter = new Intl.NumberFormat('en-US', {
 });
 
 const MAX_CITY_SUGGESTIONS = 8;
+const RESULTS_PAGE_SIZE = 100;
+// Keep in sync with scripts/build-large-cities.mjs.
+const LARGE_CITY_MIN_POPULATION = 10000;
+const CITY_DATA_URLS = {
+  large: 'data/cities-large.json',
+  all: 'data/cities.json',
+};
 const METERS_PER_MILE = 1609.344;
 const RING_SEGMENTS = 180;
 
-let cityDataPromise;
+const cityDataPromises = {};
+const citySearchIndexPromises = {};
 let detectedLocation = null;
-let citySearchIndexPromise;
+let currentResults = null;
 let latestSuggestionRequest = 0;
 let resultsMap = null;
 
@@ -78,6 +88,12 @@ detectLocationButton.addEventListener('click', async () => {
   }
 });
 
+showMoreButton.addEventListener('click', () => {
+  if (currentResults) {
+    showMoreResults();
+  }
+});
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   errorElement.textContent = '';
@@ -89,11 +105,13 @@ form.addEventListener('submit', async (event) => {
   try {
     const desiredDistance = parseNumber(distanceInput.value, 'Desired distance');
     const margin = parseNumber(marginInput.value, 'Margin of error');
-    const [cities, citySearchIndex] = await Promise.all([loadCities(), loadCitySearchIndex()]);
+    const minPopulation = parseNumber(minPopulationInput.value || '0', 'Minimum population');
+    // The smaller dataset already holds every city a search above its threshold can return.
+    const cities = await loadCities(minPopulation >= LARGE_CITY_MIN_POPULATION ? 'large' : 'all');
     const useDetectedLocation = locationInput.dataset.useDetectedLocation === 'true' && detectedLocation;
     const resolvedOrigin = useDetectedLocation
       ? detectedLocation
-      : await resolveLocation(locationInput.value.trim(), citySearchIndex);
+      : await resolveLocation(locationInput.value.trim());
     const lowerBound = Math.max(0, desiredDistance - margin);
     const upperBound = desiredDistance + margin;
 
@@ -101,6 +119,9 @@ form.addEventListener('submit', async (event) => {
 
     const matches = [];
     for (const city of cities) {
+      if (city[POPULATION_INDEX] < minPopulation) {
+        continue;
+      }
       const distance = haversineMiles(
         resolvedOrigin.latitude,
         resolvedOrigin.longitude,
@@ -168,9 +189,9 @@ async function detectCurrentLocation() {
   };
 }
 
-async function loadCities() {
-  if (!cityDataPromise) {
-    cityDataPromise = fetch('data/cities.json')
+async function loadCities(dataset = 'large') {
+  if (!cityDataPromises[dataset]) {
+    cityDataPromises[dataset] = fetch(CITY_DATA_URLS[dataset])
       .then(async (response) => {
         if (!response.ok) {
           throw new Error('Unable to load city data.');
@@ -178,25 +199,25 @@ async function loadCities() {
         return response.json();
       })
       .catch((error) => {
-        cityDataPromise = undefined;
+        delete cityDataPromises[dataset];
         throw error;
       });
   }
 
-  return cityDataPromise;
+  return cityDataPromises[dataset];
 }
 
-async function loadCitySearchIndex() {
-  if (!citySearchIndexPromise) {
-    citySearchIndexPromise = loadCities()
+async function loadCitySearchIndex(dataset = 'large') {
+  if (!citySearchIndexPromises[dataset]) {
+    citySearchIndexPromises[dataset] = loadCities(dataset)
       .then((cities) => buildCitySearchIndex(cities))
       .catch((error) => {
-        citySearchIndexPromise = undefined;
+        delete citySearchIndexPromises[dataset];
         throw error;
       });
   }
 
-  return citySearchIndexPromise;
+  return citySearchIndexPromises[dataset];
 }
 
 function parseNumber(value, label) {
@@ -240,7 +261,7 @@ function clearLocationSuggestions() {
   locationSuggestions.innerHTML = '';
 }
 
-async function resolveLocation(input, citySearchIndex) {
+async function resolveLocation(input) {
   if (!input) {
     throw new Error('Location is required.');
   }
@@ -254,7 +275,7 @@ async function resolveLocation(input, citySearchIndex) {
     };
   }
 
-  const localMatch = findCityMatch(input, citySearchIndex);
+  const localMatch = await findLocalCityMatch(input);
   if (localMatch) {
     return localMatch;
   }
@@ -373,6 +394,10 @@ function collectSearchPrefixes(entry) {
 }
 
 function findCitySuggestions(input, citySearchIndex, limit = 1) {
+  return findRankedCitySuggestions(input, citySearchIndex, limit).map((suggestion) => suggestion.entry);
+}
+
+function findRankedCitySuggestions(input, citySearchIndex, limit) {
   const { normalizedQuery, normalizedCountry } = parseLocationQuery(input);
   if (!normalizedQuery) {
     return [];
@@ -391,19 +416,27 @@ function findCitySuggestions(input, citySearchIndex, limit = 1) {
     insertRankedSuggestion(suggestions, entry, score, limit);
   }
 
-  return suggestions.map((suggestion) => suggestion.entry);
+  return suggestions;
 }
 
-function findCityMatch(input, citySearchIndex) {
-  const [match] = findCitySuggestions(input, citySearchIndex, 1);
-  if (!match) {
+// Looks in the large-city index first and only loads the full dataset when that finds no exact name match.
+async function findLocalCityMatch(input) {
+  let [best] = findRankedCitySuggestions(input, await loadCitySearchIndex('large'), 1);
+  if (!best || best.score > 0) {
+    const [fullBest] = findRankedCitySuggestions(input, await loadCitySearchIndex('all'), 1);
+    if (fullBest && (!best || compareRankedSuggestions(fullBest, best) < 0)) {
+      best = fullBest;
+    }
+  }
+
+  if (!best) {
     return null;
   }
 
   return {
-    label: match.label,
-    latitude: match.latitude,
-    longitude: match.longitude,
+    label: best.entry.label,
+    latitude: best.entry.latitude,
+    longitude: best.entry.longitude,
   };
 }
 
@@ -508,15 +541,26 @@ function toDegrees(value) {
 
 function renderResults(matches, origin, lowerBound, upperBound) {
   resultsPanel.hidden = false;
-  resultsSummary.textContent = `${matches.length} ${matches.length === 1 ? 'city' : 'cities'} between ${distanceFormatter.format(lowerBound)} and ${distanceFormatter.format(upperBound)} miles from ${origin.label}.`;
+  currentResults = { matches, origin, lowerBound, upperBound, shown: 0 };
+  resultsBody.innerHTML = '';
 
   if (matches.length === 0) {
+    updateResultsSummary();
     resultsBody.innerHTML = '<tr><td colspan="4">No cities found for that distance ring.</td></tr>';
+    showMoreButton.hidden = true;
     hideResultsMap();
     return;
   }
 
-  const rows = matches.map(({ city, distance }) => `
+  showMoreResults();
+  renderResultsMap(matches.slice(0, 5), origin, lowerBound, upperBound);
+}
+
+// Appends the next page of rows so very large result sets stay responsive.
+function showMoreResults() {
+  const { matches, shown } = currentResults;
+  const nextPage = matches.slice(shown, shown + RESULTS_PAGE_SIZE);
+  const rows = nextPage.map(({ city, distance }) => `
     <tr>
       <td>${escapeHtml(city[CITY_NAME_INDEX])}</td>
       <td>${escapeHtml(city[COUNTRY_INDEX])}</td>
@@ -525,8 +569,20 @@ function renderResults(matches, origin, lowerBound, upperBound) {
     </tr>
   `);
 
-  resultsBody.innerHTML = rows.join('');
-  renderResultsMap(matches.slice(0, 5), origin, lowerBound, upperBound);
+  resultsBody.insertAdjacentHTML('beforeend', rows.join(''));
+  currentResults.shown += nextPage.length;
+
+  const remaining = matches.length - currentResults.shown;
+  showMoreButton.hidden = remaining === 0;
+  showMoreButton.textContent = `Show ${populationFormatter.format(Math.min(RESULTS_PAGE_SIZE, remaining))} more`;
+  updateResultsSummary();
+}
+
+function updateResultsSummary() {
+  const { matches, origin, lowerBound, upperBound, shown } = currentResults;
+  const count = `${populationFormatter.format(matches.length)} ${matches.length === 1 ? 'city' : 'cities'}`;
+  const partial = shown < matches.length ? ` Showing the largest ${populationFormatter.format(shown)}.` : '';
+  resultsSummary.textContent = `${count} between ${distanceFormatter.format(lowerBound)} and ${distanceFormatter.format(upperBound)} miles from ${origin.label}.${partial}`;
 }
 
 function renderResultsMap(topMatches, origin, lowerBound, upperBound) {
