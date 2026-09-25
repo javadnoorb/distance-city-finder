@@ -1,9 +1,18 @@
-const CITY_NAME_INDEX = 0;
-const COUNTRY_INDEX = 1;
-const POPULATION_INDEX = 2;
-const LATITUDE_INDEX = 3;
-const LONGITUDE_INDEX = 4;
-const EARTH_RADIUS_MILES = 3958.7613;
+import {
+  CITY_NAME_INDEX,
+  COUNTRY_INDEX,
+  POPULATION_INDEX,
+  LATITUDE_INDEX,
+  LONGITUDE_INDEX,
+  buildCitySearchIndex,
+  compareRankedSuggestions,
+  findCitiesInRing,
+  findCitySuggestions,
+  findRankedCitySuggestions,
+  looksLikeCoordinates,
+  parseCoordinates,
+} from './lib/cities.js';
+import { buildDistanceRing, ringEnclosesPole, unwrapLongitude } from './lib/geo.js';
 
 const form = document.getElementById('search-form');
 const locationInput = document.getElementById('location');
@@ -37,8 +46,6 @@ const CITY_DATA_URLS = {
   large: 'data/cities-large.json',
   all: 'data/cities.json',
 };
-const METERS_PER_MILE = 1609.344;
-const RING_SEGMENTS = 180;
 
 const cityDataPromises = {};
 const citySearchIndexPromises = {};
@@ -117,23 +124,7 @@ form.addEventListener('submit', async (event) => {
 
     statusElement.textContent = 'Searching for matching cities...';
 
-    const matches = [];
-    for (const city of cities) {
-      if (city[POPULATION_INDEX] < minPopulation) {
-        continue;
-      }
-      const distance = haversineMiles(
-        resolvedOrigin.latitude,
-        resolvedOrigin.longitude,
-        city[LATITUDE_INDEX],
-        city[LONGITUDE_INDEX],
-      );
-      if (distance >= lowerBound && distance <= upperBound) {
-        matches.push({ city, distance });
-      }
-    }
-
-    matches.sort((left, right) => right.city[POPULATION_INDEX] - left.city[POPULATION_INDEX]);
+    const matches = findCitiesInRing(cities, resolvedOrigin, lowerBound, upperBound, minPopulation);
     renderResults(matches, resolvedOrigin, lowerBound, upperBound);
     statusElement.textContent = `Search complete. Found ${matches.length} matching ${matches.length === 1 ? 'city' : 'cities'}.`;
   } catch (error) {
@@ -314,111 +305,6 @@ async function resolveLocation(input) {
   };
 }
 
-function parseCoordinates(input) {
-  const match = input.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
-  if (!match) {
-    return null;
-  }
-
-  const latitude = Number.parseFloat(match[1]);
-  const longitude = Number.parseFloat(match[2]);
-  if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
-    throw new Error('Coordinates must be within valid latitude and longitude ranges.');
-  }
-
-  return { latitude, longitude };
-}
-
-function looksLikeCoordinates(input) {
-  return /^\s*-?\d+(?:\.\d+)?\s*,\s*-?\d*(?:\.\d+)?\s*$/.test(input);
-}
-
-function buildCitySearchIndex(cities) {
-  const entriesByLabel = new Map();
-
-  for (const city of cities) {
-    const cityName = city[CITY_NAME_INDEX];
-    const countryCode = city[COUNTRY_INDEX];
-    const label = `${cityName}, ${countryCode}`;
-    const entry = entriesByLabel.get(label);
-
-    if (entry && entry.population >= city[POPULATION_INDEX]) {
-      continue;
-    }
-
-    entriesByLabel.set(label, {
-      label,
-      population: city[POPULATION_INDEX],
-      latitude: city[LATITUDE_INDEX],
-      longitude: city[LONGITUDE_INDEX],
-      normalizedCityName: normalizeText(cityName),
-      normalizedCountry: normalizeText(countryCode),
-      normalizedLabel: normalizeText(label),
-    });
-  }
-
-  const entries = Array.from(entriesByLabel.values());
-  const buckets = new Map();
-
-  for (const entry of entries) {
-    const prefixes = collectSearchPrefixes(entry);
-    for (const prefix of prefixes) {
-      const bucket = buckets.get(prefix);
-      if (bucket) {
-        bucket.push(entry);
-      } else {
-        buckets.set(prefix, [entry]);
-      }
-    }
-  }
-
-  return { entries, buckets };
-}
-
-function collectSearchPrefixes(entry) {
-  const prefixes = new Set();
-  const addPrefixes = (value) => {
-    for (let length = 1; length <= Math.min(3, value.length); length += 1) {
-      prefixes.add(value.slice(0, length));
-    }
-  };
-
-  addPrefixes(entry.normalizedCityName);
-  addPrefixes(entry.normalizedCountry);
-
-  for (const token of entry.normalizedCityName.split(/\s+/)) {
-    addPrefixes(token);
-  }
-
-  return prefixes;
-}
-
-function findCitySuggestions(input, citySearchIndex, limit = 1) {
-  return findRankedCitySuggestions(input, citySearchIndex, limit).map((suggestion) => suggestion.entry);
-}
-
-function findRankedCitySuggestions(input, citySearchIndex, limit) {
-  const { normalizedQuery, normalizedCountry } = parseLocationQuery(input);
-  if (!normalizedQuery) {
-    return [];
-  }
-
-  const bucketKey = normalizedQuery.slice(0, Math.min(3, normalizedQuery.length));
-  const candidates = citySearchIndex.buckets.get(bucketKey) || citySearchIndex.entries;
-  const suggestions = [];
-
-  for (const entry of candidates) {
-    const score = scoreCityMatch(entry, normalizedQuery, normalizedCountry);
-    if (!Number.isFinite(score)) {
-      continue;
-    }
-
-    insertRankedSuggestion(suggestions, entry, score, limit);
-  }
-
-  return suggestions;
-}
-
 // Looks in the large-city index first and only loads the full dataset when that finds no exact name match.
 async function findLocalCityMatch(input) {
   let [best] = findRankedCitySuggestions(input, await loadCitySearchIndex('large'), 1);
@@ -438,105 +324,6 @@ async function findLocalCityMatch(input) {
     latitude: best.entry.latitude,
     longitude: best.entry.longitude,
   };
-}
-
-function parseLocationQuery(input) {
-  const [namePart, ...countryParts] = input
-    .split(',')
-    .map((part) => part.trim())
-    .filter(Boolean);
-
-  return {
-    normalizedQuery: normalizeText(namePart || input),
-    normalizedCountry: normalizeText(countryParts.join(' ')),
-  };
-}
-
-function scoreCityMatch(entry, normalizedQuery, normalizedCountry) {
-  let score = Number.POSITIVE_INFINITY;
-
-  if (entry.normalizedCityName === normalizedQuery) {
-    score = 0;
-  } else if (entry.normalizedLabel === normalizeText(`${normalizedQuery}, ${normalizedCountry}`)) {
-    score = 0;
-  } else if (entry.normalizedCityName.startsWith(normalizedQuery)) {
-    score = 1;
-  } else if (entry.normalizedCityName.includes(` ${normalizedQuery}`)) {
-    score = 2;
-  } else if (entry.normalizedLabel.startsWith(normalizedQuery)) {
-    score = 3;
-  } else if (
-    entry.normalizedLabel.includes(` ${normalizedQuery}`) ||
-    entry.normalizedLabel.includes(`, ${normalizedQuery}`)
-  ) {
-    score = 4;
-  }
-
-  if (!Number.isFinite(score)) {
-    return score;
-  }
-
-  if (!normalizedCountry) {
-    return score;
-  }
-
-  if (entry.normalizedCountry === normalizedCountry) {
-    return score - 0.5;
-  }
-
-  if (entry.normalizedCountry.startsWith(normalizedCountry)) {
-    return score + 0.25;
-  }
-
-  return Number.POSITIVE_INFINITY;
-}
-
-function insertRankedSuggestion(suggestions, entry, score, limit) {
-  const candidate = { entry, score };
-  let index = suggestions.findIndex((suggestion) => compareRankedSuggestions(candidate, suggestion) < 0);
-
-  if (index === -1) {
-    index = suggestions.length;
-  }
-
-  suggestions.splice(index, 0, candidate);
-
-  if (suggestions.length > limit) {
-    suggestions.length = limit;
-  }
-}
-
-function compareRankedSuggestions(left, right) {
-  if (left.score !== right.score) {
-    return left.score - right.score;
-  }
-
-  if (left.entry.population !== right.entry.population) {
-    return right.entry.population - left.entry.population;
-  }
-
-  return left.entry.label.localeCompare(right.entry.label);
-}
-
-function haversineMiles(latitudeA, longitudeA, latitudeB, longitudeB) {
-  const latitudeDelta = toRadians(latitudeB - latitudeA);
-  const longitudeDelta = toRadians(longitudeB - longitudeA);
-  const latitudeARadians = toRadians(latitudeA);
-  const latitudeBRadians = toRadians(latitudeB);
-
-  const a =
-    Math.sin(latitudeDelta / 2) ** 2 +
-    Math.cos(latitudeARadians) * Math.cos(latitudeBRadians) * Math.sin(longitudeDelta / 2) ** 2;
-
-  return 2 * EARTH_RADIUS_MILES * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function toRadians(value) {
-  return (value * Math.PI) / 180;
-}
-
-function toDegrees(value) {
-  return (value * 180) / Math.PI;
 }
 
 function renderResults(matches, origin, lowerBound, upperBound) {
@@ -666,10 +453,8 @@ function drawDistanceRing(origin, lowerBound, upperBound) {
   const ringStyle = { color: '#1d4ed8', weight: 1.5, dashArray: '6 6', fillColor: '#60a5fa', fillOpacity: 0.12 };
   const outerRing = buildDistanceRing(origin, upperBound);
   const innerRing = lowerBound > 0 ? buildDistanceRing(origin, lowerBound) : null;
-  const milesToNorthPole = EARTH_RADIUS_MILES * toRadians(90 - origin.latitude);
-  const milesToSouthPole = EARTH_RADIUS_MILES * toRadians(90 + origin.latitude);
 
-  if (upperBound < Math.min(milesToNorthPole, milesToSouthPole)) {
+  if (!ringEnclosesPole(origin, upperBound)) {
     L.polygon(innerRing ? [outerRing, innerRing] : outerRing, ringStyle).addTo(resultsMap);
     return;
   }
@@ -678,36 +463,6 @@ function drawDistanceRing(origin, lowerBound, upperBound) {
   [outerRing, innerRing].filter(Boolean).forEach((ring) => {
     L.polyline(ring, { ...ringStyle, fill: false }).addTo(resultsMap);
   });
-}
-
-function buildDistanceRing(origin, distanceMiles) {
-  const angularDistance = distanceMiles / EARTH_RADIUS_MILES;
-  const latitude = toRadians(origin.latitude);
-  const longitude = toRadians(origin.longitude);
-  const points = [];
-  let previousLongitude = origin.longitude;
-
-  for (let step = 0; step <= RING_SEGMENTS; step += 1) {
-    const bearing = (step / RING_SEGMENTS) * 2 * Math.PI;
-    const pointLatitude = Math.asin(
-      Math.sin(latitude) * Math.cos(angularDistance) +
-        Math.cos(latitude) * Math.sin(angularDistance) * Math.cos(bearing),
-    );
-    const pointLongitude =
-      longitude +
-      Math.atan2(
-        Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(latitude),
-        Math.cos(angularDistance) - Math.sin(latitude) * Math.sin(pointLatitude),
-      );
-    // Unwrap each point relative to the previous one so the ring never jumps across the map.
-    previousLongitude = unwrapLongitude(toDegrees(pointLongitude), previousLongitude);
-    points.push([toDegrees(pointLatitude), previousLongitude]);
-  }
-
-  // A ring around a pole spans every longitude, so shift it by whole turns to center it on the origin.
-  const meanLongitude = points.reduce((sum, [, pointLongitude]) => sum + pointLongitude, 0) / points.length;
-  const shift = 360 * Math.round((origin.longitude - meanLongitude) / 360);
-  return points.map(([pointLatitude, pointLongitude]) => [pointLatitude, pointLongitude + shift]);
 }
 
 function destroyResultsMap() {
@@ -724,14 +479,6 @@ function hideResultsMap() {
   resultsMapElement.innerHTML = '';
 }
 
-function unwrapLongitude(longitude, referenceLongitude) {
-  return referenceLongitude + normalizeLongitude(longitude - referenceLongitude);
-}
-
-function normalizeLongitude(value) {
-  return ((((value + 180) % 360) + 360) % 360) - 180;
-}
-
 function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -741,10 +488,3 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-function normalizeText(value) {
-  return String(value)
-    .normalize('NFD')
-    .replaceAll(/\p{Diacritic}/gu, '')
-    .toLowerCase()
-    .trim();
-}
