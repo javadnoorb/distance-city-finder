@@ -13,11 +13,13 @@ import {
   parseCoordinates,
 } from './lib/cities.js';
 import { buildDistanceRing, ringEnclosesPole, unwrapLongitude } from './lib/geo.js';
+import { DEFAULT_UNIT, DISTANCE_UNITS, convertDistance, fromMiles, isDistanceUnit, toMiles } from './lib/units.js';
 
 const form = document.getElementById('search-form');
 const locationInput = document.getElementById('location');
 const detectLocationButton = document.getElementById('detect-location');
 const locationSuggestions = document.getElementById('location-suggestions');
+const unitSelect = document.getElementById('unit');
 const distanceInput = document.getElementById('distance');
 const marginInput = document.getElementById('margin');
 const minPopulationInput = document.getElementById('min-population');
@@ -40,6 +42,7 @@ const distanceFormatter = new Intl.NumberFormat('en-US', {
 
 const MAX_CITY_SUGGESTIONS = 8;
 const RESULTS_PAGE_SIZE = 100;
+const UNIT_STORAGE_KEY = 'distance-city-finder:unit';
 // Keep in sync with scripts/build-large-cities.mjs.
 const LARGE_CITY_MIN_POPULATION = 10000;
 const CITY_DATA_URLS = {
@@ -53,6 +56,25 @@ let detectedLocation = null;
 let currentResults = null;
 let latestSuggestionRequest = 0;
 let resultsMap = null;
+let currentUnit = DEFAULT_UNIT;
+
+setUnit(loadSavedUnit());
+
+unitSelect.addEventListener('change', () => {
+  const previousUnit = currentUnit;
+  setUnit(unitSelect.value);
+  saveUnit(currentUnit);
+  // Convert what's already typed so the search itself doesn't change.
+  for (const input of [distanceInput, marginInput]) {
+    const value = Number.parseFloat(input.value);
+    if (Number.isFinite(value)) {
+      input.value = String(convertDistance(value, previousUnit, currentUnit));
+    }
+  }
+  if (currentResults) {
+    rerenderResults();
+  }
+});
 
 locationInput.addEventListener('focus', () => {
   void updateLocationSuggestions();
@@ -110,8 +132,8 @@ form.addEventListener('submit', async (event) => {
   submitButton.disabled = true;
 
   try {
-    const desiredDistance = parseNumber(distanceInput.value, 'Desired distance');
-    const margin = parseNumber(marginInput.value, 'Margin of error');
+    const desiredDistance = toMiles(parseNumber(distanceInput.value, 'Desired distance'), currentUnit);
+    const margin = toMiles(parseNumber(marginInput.value, 'Margin of error'), currentUnit);
     const minPopulation = parseNumber(minPopulationInput.value || '0', 'Minimum population');
     // The smaller dataset already holds every city a search above its threshold can return.
     const cities = await loadCities(minPopulation >= LARGE_CITY_MIN_POPULATION ? 'large' : 'all');
@@ -343,20 +365,24 @@ function renderResults(matches, origin, lowerBound, upperBound) {
   renderResultsMap(matches.slice(0, 5), origin, lowerBound, upperBound);
 }
 
+// Redraws the visible results, e.g. after the distance unit changes.
+function rerenderResults() {
+  const { matches, origin, lowerBound, upperBound, shown } = currentResults;
+  updateResultsSummary();
+  if (matches.length === 0) {
+    return;
+  }
+
+  resultsBody.innerHTML = buildResultRows(matches.slice(0, shown));
+  renderResultsMap(matches.slice(0, 5), origin, lowerBound, upperBound);
+}
+
 // Appends the next page of rows so very large result sets stay responsive.
 function showMoreResults() {
   const { matches, shown } = currentResults;
   const nextPage = matches.slice(shown, shown + RESULTS_PAGE_SIZE);
-  const rows = nextPage.map(({ city, distance }) => `
-    <tr>
-      <td>${escapeHtml(city[CITY_NAME_INDEX])}</td>
-      <td>${escapeHtml(city[COUNTRY_INDEX])}</td>
-      <td>${populationFormatter.format(city[POPULATION_INDEX])}</td>
-      <td>${distanceFormatter.format(distance)}</td>
-    </tr>
-  `);
 
-  resultsBody.insertAdjacentHTML('beforeend', rows.join(''));
+  resultsBody.insertAdjacentHTML('beforeend', buildResultRows(nextPage));
   currentResults.shown += nextPage.length;
 
   const remaining = matches.length - currentResults.shown;
@@ -365,11 +391,59 @@ function showMoreResults() {
   updateResultsSummary();
 }
 
+function buildResultRows(matches) {
+  return matches
+    .map(({ city, distance }) => `
+      <tr>
+        <td>${escapeHtml(city[CITY_NAME_INDEX])}</td>
+        <td>${escapeHtml(city[COUNTRY_INDEX])}</td>
+        <td>${populationFormatter.format(city[POPULATION_INDEX])}</td>
+        <td>${formatDistanceValue(distance)}</td>
+      </tr>
+    `)
+    .join('');
+}
+
 function updateResultsSummary() {
   const { matches, origin, lowerBound, upperBound, shown } = currentResults;
   const count = `${populationFormatter.format(matches.length)} ${matches.length === 1 ? 'city' : 'cities'}`;
   const partial = shown < matches.length ? ` Showing the largest ${populationFormatter.format(shown)}.` : '';
-  resultsSummary.textContent = `${count} between ${distanceFormatter.format(lowerBound)} and ${distanceFormatter.format(upperBound)} miles from ${origin.label}.${partial}`;
+  resultsSummary.textContent = `${count} between ${formatDistanceValue(lowerBound)} and ${formatDistanceValue(upperBound)} ${DISTANCE_UNITS[currentUnit].name} from ${origin.label}.${partial}`;
+}
+
+function formatDistanceValue(miles) {
+  return distanceFormatter.format(fromMiles(miles, currentUnit));
+}
+
+function formatDistance(miles) {
+  return `${formatDistanceValue(miles)} ${currentUnit}`;
+}
+
+function setUnit(unit) {
+  currentUnit = isDistanceUnit(unit) ? unit : DEFAULT_UNIT;
+  unitSelect.value = currentUnit;
+  document.querySelectorAll('.unit-name').forEach((element) => {
+    element.textContent = DISTANCE_UNITS[currentUnit].name;
+  });
+  document.querySelectorAll('.unit-label').forEach((element) => {
+    element.textContent = currentUnit;
+  });
+}
+
+function loadSavedUnit() {
+  try {
+    return localStorage.getItem(UNIT_STORAGE_KEY) || DEFAULT_UNIT;
+  } catch {
+    return DEFAULT_UNIT;
+  }
+}
+
+function saveUnit(unit) {
+  try {
+    localStorage.setItem(UNIT_STORAGE_KEY, unit);
+  } catch {
+    // Storage can be unavailable (e.g. private browsing); the choice just won't persist.
+  }
 }
 
 function renderResultsMap(topMatches, origin, lowerBound, upperBound) {
@@ -392,7 +466,7 @@ function renderResultsMap(topMatches, origin, lowerBound, upperBound) {
     ...topMatches.map(({ city, distance }, index) => `
       <li class="map-legend-item">
         <span class="map-legend-rank" aria-hidden="true">${index + 1}</span>
-        <span>${escapeHtml(city[CITY_NAME_INDEX])}, ${escapeHtml(city[COUNTRY_INDEX])} · Pop. ${populationFormatter.format(city[POPULATION_INDEX])} · ${distanceFormatter.format(distance)} mi</span>
+        <span>${escapeHtml(city[CITY_NAME_INDEX])}, ${escapeHtml(city[COUNTRY_INDEX])} · Pop. ${populationFormatter.format(city[POPULATION_INDEX])} · ${formatDistance(distance)}</span>
       </li>
     `),
   ];
@@ -440,7 +514,7 @@ function renderResultsMap(topMatches, origin, lowerBound, upperBound) {
       .bindPopup(`
         <strong>#${rank} ${escapeHtml(city[CITY_NAME_INDEX])}, ${escapeHtml(city[COUNTRY_INDEX])}</strong><br />
         Population ${populationFormatter.format(city[POPULATION_INDEX])}<br />
-        ${distanceFormatter.format(distance)} miles away
+        ${formatDistanceValue(distance)} ${DISTANCE_UNITS[currentUnit].name} away
       `)
       .addTo(resultsMap);
   });

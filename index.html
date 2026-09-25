@@ -36,12 +36,20 @@
 
           <div class="field-row">
             <label>
-              <span>Desired distance (miles)</span>
+              <span>Units</span>
+              <select id="unit" name="unit">
+                <option value="mi">Miles</option>
+                <option value="km">Kilometers</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Desired distance (<span class="unit-name">miles</span>)</span>
               <input id="distance" name="distance" type="number" min="0" step="any" required />
             </label>
 
             <label>
-              <span>Margin of error (miles)</span>
+              <span>Margin of error (<span class="unit-name">miles</span>)</span>
               <input
                 id="margin"
                 name="margin"
@@ -98,7 +106,7 @@
                 <th>City</th>
                 <th>Country</th>
                 <th>Population</th>
-                <th>Distance (mi)</th>
+                <th>Distance (<span class="unit-label">mi</span>)</th>
               </tr>
             </thead>
             <tbody id="results-body"></tbody>

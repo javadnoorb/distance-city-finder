@@ -83,7 +83,7 @@ h2 {
 .field-row {
   display: grid;
   gap: 1rem;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
 }
 
 .location-input-row {
@@ -104,11 +104,13 @@ label > span {
 }
 
 input,
+select,
 button {
   font: inherit;
 }
 
-input {
+input,
+select {
   width: 100%;
   padding: 0.78rem 0.85rem;
   border: 1px solid #cbd5e1;
@@ -118,7 +120,8 @@ input {
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: none;
   border-color: #2563eb;
   box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.17);
