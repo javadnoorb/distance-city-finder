@@ -13,6 +13,7 @@ import {
   parseCoordinates,
 } from './lib/cities.js';
 import { buildDistanceRing, ringEnclosesPole, unwrapLongitude } from './lib/geo.js';
+import { searchFromQueryString, searchToQueryString } from './lib/query.js';
 import { DEFAULT_UNIT, DISTANCE_UNITS, convertDistance, fromMiles, isDistanceUnit, toMiles } from './lib/units.js';
 
 const form = document.getElementById('search-form');
@@ -32,6 +33,7 @@ const resultsMapSummary = document.getElementById('results-map-summary');
 const resultsMapElement = document.getElementById('results-map');
 const resultsBody = document.getElementById('results-body');
 const showMoreButton = document.getElementById('show-more');
+const copyLinkButton = document.getElementById('copy-link');
 const submitButton = form.querySelector('button[type="submit"]');
 
 const populationFormatter = new Intl.NumberFormat('en-US');
@@ -117,6 +119,15 @@ detectLocationButton.addEventListener('click', async () => {
   }
 });
 
+copyLinkButton.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(window.location.href);
+    statusElement.textContent = 'Link to this search copied.';
+  } catch {
+    statusElement.textContent = 'Copy the link from the address bar to share this search.';
+  }
+});
+
 showMoreButton.addEventListener('click', () => {
   if (currentResults) {
     showMoreResults();
@@ -148,6 +159,7 @@ form.addEventListener('submit', async (event) => {
 
     const matches = findCitiesInRing(cities, resolvedOrigin, lowerBound, upperBound, minPopulation);
     renderResults(matches, resolvedOrigin, lowerBound, upperBound);
+    saveSearchToUrl();
     statusElement.textContent = `Search complete. Found ${matches.length} matching ${matches.length === 1 ? 'city' : 'cities'}.`;
   } catch (error) {
     statusElement.textContent = '';
@@ -157,6 +169,38 @@ form.addEventListener('submit', async (event) => {
     submitButton.disabled = false;
   }
 });
+
+// Keeps the current search in the address bar so it can be bookmarked or shared.
+function saveSearchToUrl() {
+  const queryString = searchToQueryString({
+    location: locationInput.value,
+    distance: distanceInput.value,
+    margin: marginInput.value,
+    minPopulation: minPopulationInput.value,
+    unit: currentUnit,
+  });
+  window.history.replaceState(null, '', `${window.location.pathname}?${queryString}`);
+}
+
+function runSearchFromUrl() {
+  const search = searchFromQueryString(window.location.search);
+  if (!search) {
+    return;
+  }
+
+  if (search.unit) {
+    setUnit(search.unit);
+  }
+  locationInput.value = search.location;
+  distanceInput.value = search.distance;
+  if (search.margin) {
+    marginInput.value = search.margin;
+  }
+  if (search.minPopulation) {
+    minPopulationInput.value = search.minPopulation;
+  }
+  form.requestSubmit();
+}
 
 function clearDetectedLocation() {
   detectedLocation = null;
@@ -562,3 +606,4 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
+runSearchFromUrl();

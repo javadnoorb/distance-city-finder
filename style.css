@@ -208,6 +208,11 @@ code {
   align-items: baseline;
 }
 
+.copy-link-button {
+  padding: 0.45rem 0.95rem;
+  font-size: 0.9rem;
+}
+
 #results-summary {
   color: #334155;
 }
