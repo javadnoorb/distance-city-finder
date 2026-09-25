@@ -18,6 +18,12 @@ jobs:
           node-version: 22
       - name: Syntax check
         run: for file in app.js lib/*.js scripts/*.mjs; do node --check "$file"; done
+      - name: Check app.js imports resolve
+        # node --check only parses; importing catches misspelled or missing exports. app.js then
+        # fails on `document` (expected outside a browser), so only SyntaxErrors fail the step.
+        run: >-
+          node --input-type=module -e "import('./app.js').catch((error) => {
+          if (error instanceof SyntaxError) { console.error(error); process.exit(1); } })"
       - name: Unit tests
         run: npm test
       - name: Check data/cities-large.json is up to date

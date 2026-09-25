@@ -5,8 +5,7 @@
 // Usage: node scripts/build-large-cities.mjs
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const LARGE_CITY_MIN_POPULATION = 10000;
-const POPULATION_INDEX = 2;
+import { LARGE_CITY_MIN_POPULATION, POPULATION_INDEX } from '../lib/cities.js';
 
 const cities = JSON.parse(readFileSync(new URL('../data/cities.json', import.meta.url), 'utf8'));
 const largeCities = cities.filter((city) => city[POPULATION_INDEX] >= LARGE_CITY_MIN_POPULATION);

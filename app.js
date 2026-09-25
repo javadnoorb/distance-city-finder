@@ -4,6 +4,7 @@ import {
   POPULATION_INDEX,
   LATITUDE_INDEX,
   LONGITUDE_INDEX,
+  LARGE_CITY_MIN_POPULATION,
   buildCitySearchIndex,
   compareRankedSuggestions,
   findCitiesInRing,
@@ -16,7 +17,15 @@ import {
 } from './lib/cities.js';
 import { buildDistanceRing, ringEnclosesPole, unwrapLongitude } from './lib/geo.js';
 import { searchFromQueryString, searchToQueryString } from './lib/query.js';
-import { DEFAULT_UNIT, DISTANCE_UNITS, convertDistance, fromMiles, isDistanceUnit, toMiles } from './lib/units.js';
+import {
+  DEFAULT_UNIT,
+  DISTANCE_UNITS,
+  convertDistance,
+  fromMiles,
+  isDistanceUnit,
+  roundDistance,
+  toMiles,
+} from './lib/units.js';
 
 const form = document.getElementById('search-form');
 const locationInput = document.getElementById('location');
@@ -48,8 +57,6 @@ const distanceFormatter = new Intl.NumberFormat('en-US', {
 const MAX_CITY_SUGGESTIONS = 8;
 const RESULTS_PAGE_SIZE = 100;
 const UNIT_STORAGE_KEY = 'distance-city-finder:unit';
-// Keep in sync with scripts/build-large-cities.mjs.
-const LARGE_CITY_MIN_POPULATION = 10000;
 const CITY_DATA_URLS = {
   large: 'data/cities-large.json',
   all: 'data/cities.json',
@@ -62,6 +69,7 @@ let currentResults = null;
 let latestSuggestionRequest = 0;
 let resultsMap = null;
 let currentUnit = DEFAULT_UNIT;
+let searchInProgress = false;
 
 setUnit(loadSavedUnit());
 
@@ -69,12 +77,19 @@ unitSelect.addEventListener('change', () => {
   const previousUnit = currentUnit;
   setUnit(unitSelect.value);
   saveUnit(currentUnit);
-  // Convert what's already typed so the search itself doesn't change.
+  // Convert what's already typed. The field shows a rounded value, but the exact one is kept
+  // (see readDistanceInput) so switching units never changes the search itself.
   for (const input of [distanceInput, marginInput]) {
-    const value = Number.parseFloat(input.value);
-    if (Number.isFinite(value)) {
-      input.value = String(convertDistance(value, previousUnit, currentUnit));
+    let value;
+    try {
+      value = readDistanceInput(input, input.id);
+    } catch {
+      continue;
     }
+    const exactValue = convertDistance(value, previousUnit, currentUnit);
+    input.value = String(roundDistance(exactValue));
+    input.dataset.shownValue = input.value;
+    input.dataset.exactValue = String(exactValue);
   }
   if (currentResults) {
     rerenderResults();
@@ -118,11 +133,13 @@ detectLocationButton.addEventListener('click', async () => {
     errorElement.textContent = error.message || 'Unable to detect current location.';
   } finally {
     detectLocationButton.disabled = false;
-    submitButton.disabled = false;
+    submitButton.disabled = searchInProgress;
   }
 });
 
 copyLinkButton.addEventListener('click', async () => {
+  // Clear first so screen readers announce the message again on repeated clicks.
+  statusElement.textContent = '';
   try {
     await navigator.clipboard.writeText(window.location.href);
     statusElement.textContent = 'Link to this search copied.';
@@ -147,6 +164,10 @@ showMoreButton.addEventListener('click', () => {
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (searchInProgress) {
+    return;
+  }
+  searchInProgress = true;
   errorElement.textContent = '';
   statusElement.textContent = 'Resolving location and loading city data...';
   resultsPanel.hidden = true;
@@ -154,15 +175,22 @@ form.addEventListener('submit', async (event) => {
   submitButton.disabled = true;
 
   try {
-    const desiredDistance = toMiles(parseNumber(distanceInput.value, 'Desired distance'), currentUnit);
-    const margin = toMiles(parseNumber(marginInput.value, 'Margin of error'), currentUnit);
-    const minPopulation = parseNumber(minPopulationInput.value || '0', 'Minimum population');
+    // Read every field once, up front, so edits made while data loads can't leak into this
+    // search or into the link saved for it.
+    const search = {
+      location: locationInput.value.trim(),
+      distance: readDistanceInput(distanceInput, 'Desired distance'),
+      margin: readDistanceInput(marginInput, 'Margin of error'),
+      minPopulation: parseNumber(minPopulationInput.value || '0', 'Minimum population'),
+      unit: currentUnit,
+      detectedOrigin: locationInput.dataset.useDetectedLocation === 'true' ? detectedLocation : null,
+    };
+    const desiredDistance = toMiles(search.distance, search.unit);
+    const margin = toMiles(search.margin, search.unit);
+    const { minPopulation } = search;
     // The smaller dataset already holds every city a search above its threshold can return.
     const cities = await loadCities(minPopulation >= LARGE_CITY_MIN_POPULATION ? 'large' : 'all');
-    const useDetectedLocation = locationInput.dataset.useDetectedLocation === 'true' && detectedLocation;
-    const resolvedOrigin = useDetectedLocation
-      ? detectedLocation
-      : await resolveLocation(locationInput.value.trim());
+    const resolvedOrigin = search.detectedOrigin || (await resolveLocation(search.location));
     const lowerBound = Math.max(0, desiredDistance - margin);
     const upperBound = desiredDistance + margin;
 
@@ -170,25 +198,26 @@ form.addEventListener('submit', async (event) => {
 
     const matches = findCitiesInRing(cities, resolvedOrigin, lowerBound, upperBound, minPopulation);
     renderResults(matches, resolvedOrigin, lowerBound, upperBound);
-    saveSearchToUrl();
+    saveSearchToUrl(search);
     statusElement.textContent = `Search complete. Found ${matches.length} matching ${matches.length === 1 ? 'city' : 'cities'}.`;
   } catch (error) {
     statusElement.textContent = '';
     resultsPanel.hidden = true;
     errorElement.textContent = error.message || 'Unable to complete the search.';
   } finally {
+    searchInProgress = false;
     submitButton.disabled = false;
   }
 });
 
 // Keeps the current search in the address bar so it can be bookmarked or shared.
-function saveSearchToUrl() {
+function saveSearchToUrl(search) {
   const queryString = searchToQueryString({
-    location: locationInput.value,
-    distance: distanceInput.value,
-    margin: marginInput.value,
-    minPopulation: minPopulationInput.value,
-    unit: currentUnit,
+    location: search.location,
+    distance: formatUrlNumber(search.distance),
+    margin: formatUrlNumber(search.margin),
+    minPopulation: formatUrlNumber(search.minPopulation),
+    unit: search.unit,
   });
   window.history.replaceState(null, '', `${window.location.pathname}?${queryString}`);
 }
@@ -210,7 +239,31 @@ function runSearchFromUrl() {
   if (search.minPopulation) {
     minPopulationInput.value = search.minPopulation;
   }
-  form.requestSubmit();
+
+  // requestSubmit() fails silently when a value passes the link parser but not the form's own checks.
+  if (!form.checkValidity()) {
+    errorElement.textContent = 'This link has invalid search values. Check the form and search again.';
+    return;
+  }
+  // Safari before 16 lacks requestSubmit(); dispatching the event runs the same handler.
+  if (form.requestSubmit) {
+    form.requestSubmit();
+  } else {
+    form.dispatchEvent(new Event('submit', { cancelable: true }));
+  }
+}
+
+// Unit switches show a rounded value; while the field still shows it, use the exact value instead.
+function readDistanceInput(input, label) {
+  if (input.dataset.exactValue !== undefined && input.value === input.dataset.shownValue) {
+    return Number(input.dataset.exactValue);
+  }
+  return parseNumber(input.value, label);
+}
+
+// Up to six decimals keeps exact unit conversions without long float tails in the URL.
+function formatUrlNumber(value) {
+  return String(Number(value.toFixed(6)));
 }
 
 function clearDetectedLocation() {
@@ -458,6 +511,10 @@ function showMoreResults() {
 
 // Re-sorts the table, keeping the same number of rows visible. Clicking the active column reverses it.
 function sortResults(sortKey) {
+  if (currentResults.matches.length === 0) {
+    return;
+  }
+
   const sortDirection =
     currentResults.sortKey === sortKey
       ? currentResults.sortDirection === 'ascending'
@@ -473,6 +530,8 @@ function sortResults(sortKey) {
   updateSortHeaders();
   resultsBody.innerHTML = buildResultRows(currentResults.sortedMatches.slice(0, currentResults.shown));
   updateResultsSummary();
+  const columnName = document.querySelector(`th[data-sort-key="${sortKey}"] .sort-button`).textContent.trim();
+  statusElement.textContent = `Sorted by ${columnName.toLowerCase()}, ${sortDirection}.`;
 }
 
 function updateSortHeaders() {
@@ -619,7 +678,8 @@ function renderResultsMap(topMatches, origin, lowerBound, upperBound) {
 
 // Shades the band between the lower and upper search distances, following great circles.
 function drawDistanceRing(origin, lowerBound, upperBound) {
-  const ringStyle = { color: '#1d4ed8', weight: 1.5, dashArray: '6 6', fillColor: '#60a5fa', fillOpacity: 0.12 };
+  const ringColor = getComputedStyle(document.documentElement).getPropertyValue('--origin').trim() || '#1d4ed8';
+  const ringStyle = { color: ringColor, weight: 1.5, dashArray: '6 6', fillColor: '#60a5fa', fillOpacity: 0.12 };
   const outerRing = buildDistanceRing(origin, upperBound);
   const innerRing = lowerBound > 0 ? buildDistanceRing(origin, lowerBound) : null;
 

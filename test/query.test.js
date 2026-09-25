@@ -10,6 +10,10 @@ test('a search round-trips through the query string', () => {
   assert.deepEqual(searchFromQueryString(`?${queryString}`), search);
 });
 
+test('values are trimmed in the query string', () => {
+  assert.equal(searchToQueryString({ location: '  Chicago ', distance: ' 500 ' }), 'from=Chicago&d=500');
+});
+
 test('empty fields are left out of the query string', () => {
   assert.equal(searchToQueryString({ location: 'Chicago', distance: '500', margin: '', unit: 'mi' }), 'from=Chicago&d=500&unit=mi');
 });

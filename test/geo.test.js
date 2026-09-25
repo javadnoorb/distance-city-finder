@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  EARTH_RADIUS_MILES,
   buildDistanceRing,
   haversineMiles,
   normalizeLongitude,
   ringEnclosesPole,
+  toRadians,
   unwrapLongitude,
 } from '../lib/geo.js';
 
@@ -14,7 +16,7 @@ const NEW_YORK = { latitude: 40.7128, longitude: -74.006 };
 
 test('haversineMiles matches known city distances', () => {
   const distance = haversineMiles(CHICAGO.latitude, CHICAGO.longitude, NEW_YORK.latitude, NEW_YORK.longitude);
-  assert.ok(Math.abs(distance - 711) < 5, `Chicago to New York was ${distance}`);
+  assert.ok(Math.abs(distance - 711.03) < 0.05, `Chicago to New York was ${distance}`);
   assert.equal(haversineMiles(10, 20, 10, 20), 0);
 });
 
@@ -60,6 +62,8 @@ test('a ring around a pole is centered on the origin longitude', () => {
   assert.ok(Math.abs(southernmost[1] - reykjavik.longitude) < 1);
 });
 
-test('ringEnclosesPole is false for ordinary rings', () => {
+test('ringEnclosesPole is false for ordinary rings and true exactly at the pole', () => {
   assert.equal(ringEnclosesPole(CHICAGO, 500), false);
+  const milesToNorthPole = EARTH_RADIUS_MILES * toRadians(90 - CHICAGO.latitude);
+  assert.equal(ringEnclosesPole(CHICAGO, milesToNorthPole), true);
 });
