@@ -1,14 +1,37 @@
-const CITY_NAME_INDEX = 0;
-const COUNTRY_INDEX = 1;
-const POPULATION_INDEX = 2;
-const LATITUDE_INDEX = 3;
-const LONGITUDE_INDEX = 4;
-const EARTH_RADIUS_MILES = 3958.7613;
+import {
+  CITY_NAME_INDEX,
+  COUNTRY_INDEX,
+  POPULATION_INDEX,
+  LATITUDE_INDEX,
+  LONGITUDE_INDEX,
+  LARGE_CITY_MIN_POPULATION,
+  buildCitySearchIndex,
+  compareRankedSuggestions,
+  findCitiesInRing,
+  findCitySuggestions,
+  findRankedCitySuggestions,
+  looksLikeCoordinates,
+  parseCoordinates,
+  SORT_KEYS,
+  sortMatches,
+} from './lib/cities.js';
+import { buildDistanceRing, ringEnclosesPole, unwrapLongitude } from './lib/geo.js';
+import { searchFromQueryString, searchToQueryString } from './lib/query.js';
+import {
+  DEFAULT_UNIT,
+  DISTANCE_UNITS,
+  convertDistance,
+  fromMiles,
+  isDistanceUnit,
+  roundDistance,
+  toMiles,
+} from './lib/units.js';
 
 const form = document.getElementById('search-form');
 const locationInput = document.getElementById('location');
 const detectLocationButton = document.getElementById('detect-location');
 const locationSuggestions = document.getElementById('location-suggestions');
+const unitSelect = document.getElementById('unit');
 const distanceInput = document.getElementById('distance');
 const marginInput = document.getElementById('margin');
 const minPopulationInput = document.getElementById('min-population');
@@ -21,6 +44,8 @@ const resultsMapSummary = document.getElementById('results-map-summary');
 const resultsMapElement = document.getElementById('results-map');
 const resultsBody = document.getElementById('results-body');
 const showMoreButton = document.getElementById('show-more');
+const copyLinkButton = document.getElementById('copy-link');
+const sortHeaders = document.querySelectorAll('th[data-sort-key]');
 const submitButton = form.querySelector('button[type="submit"]');
 
 const populationFormatter = new Intl.NumberFormat('en-US');
@@ -31,14 +56,11 @@ const distanceFormatter = new Intl.NumberFormat('en-US', {
 
 const MAX_CITY_SUGGESTIONS = 8;
 const RESULTS_PAGE_SIZE = 100;
-// Keep in sync with scripts/build-large-cities.mjs.
-const LARGE_CITY_MIN_POPULATION = 10000;
+const UNIT_STORAGE_KEY = 'distance-city-finder:unit';
 const CITY_DATA_URLS = {
   large: 'data/cities-large.json',
   all: 'data/cities.json',
 };
-const METERS_PER_MILE = 1609.344;
-const RING_SEGMENTS = 180;
 
 const cityDataPromises = {};
 const citySearchIndexPromises = {};
@@ -46,6 +68,33 @@ let detectedLocation = null;
 let currentResults = null;
 let latestSuggestionRequest = 0;
 let resultsMap = null;
+let currentUnit = DEFAULT_UNIT;
+let searchInProgress = false;
+
+setUnit(loadSavedUnit());
+
+unitSelect.addEventListener('change', () => {
+  const previousUnit = currentUnit;
+  setUnit(unitSelect.value);
+  saveUnit(currentUnit);
+  // Convert what's already typed. The field shows a rounded value, but the exact one is kept
+  // (see readDistanceInput) so switching units never changes the search itself.
+  for (const input of [distanceInput, marginInput]) {
+    let value;
+    try {
+      value = readDistanceInput(input, input.id);
+    } catch {
+      continue;
+    }
+    const exactValue = convertDistance(value, previousUnit, currentUnit);
+    input.value = String(roundDistance(exactValue));
+    input.dataset.shownValue = input.value;
+    input.dataset.exactValue = String(exactValue);
+  }
+  if (currentResults) {
+    rerenderResults();
+  }
+});
 
 locationInput.addEventListener('focus', () => {
   void updateLocationSuggestions();
@@ -84,8 +133,27 @@ detectLocationButton.addEventListener('click', async () => {
     errorElement.textContent = error.message || 'Unable to detect current location.';
   } finally {
     detectLocationButton.disabled = false;
-    submitButton.disabled = false;
+    submitButton.disabled = searchInProgress;
   }
+});
+
+copyLinkButton.addEventListener('click', async () => {
+  // Clear first so screen readers announce the message again on repeated clicks.
+  statusElement.textContent = '';
+  try {
+    await navigator.clipboard.writeText(window.location.href);
+    statusElement.textContent = 'Link to this search copied.';
+  } catch {
+    statusElement.textContent = 'Copy the link from the address bar to share this search.';
+  }
+});
+
+sortHeaders.forEach((header) => {
+  header.querySelector('.sort-button').addEventListener('click', () => {
+    if (currentResults) {
+      sortResults(header.dataset.sortKey);
+    }
+  });
 });
 
 showMoreButton.addEventListener('click', () => {
@@ -96,6 +164,10 @@ showMoreButton.addEventListener('click', () => {
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (searchInProgress) {
+    return;
+  }
+  searchInProgress = true;
   errorElement.textContent = '';
   statusElement.textContent = 'Resolving location and loading city data...';
   resultsPanel.hidden = true;
@@ -103,47 +175,96 @@ form.addEventListener('submit', async (event) => {
   submitButton.disabled = true;
 
   try {
-    const desiredDistance = parseNumber(distanceInput.value, 'Desired distance');
-    const margin = parseNumber(marginInput.value, 'Margin of error');
-    const minPopulation = parseNumber(minPopulationInput.value || '0', 'Minimum population');
+    // Read every field once, up front, so edits made while data loads can't leak into this
+    // search or into the link saved for it.
+    const search = {
+      location: locationInput.value.trim(),
+      distance: readDistanceInput(distanceInput, 'Desired distance'),
+      margin: readDistanceInput(marginInput, 'Margin of error'),
+      minPopulation: parseNumber(minPopulationInput.value || '0', 'Minimum population'),
+      unit: currentUnit,
+      detectedOrigin: locationInput.dataset.useDetectedLocation === 'true' ? detectedLocation : null,
+    };
+    const desiredDistance = toMiles(search.distance, search.unit);
+    const margin = toMiles(search.margin, search.unit);
+    const { minPopulation } = search;
     // The smaller dataset already holds every city a search above its threshold can return.
     const cities = await loadCities(minPopulation >= LARGE_CITY_MIN_POPULATION ? 'large' : 'all');
-    const useDetectedLocation = locationInput.dataset.useDetectedLocation === 'true' && detectedLocation;
-    const resolvedOrigin = useDetectedLocation
-      ? detectedLocation
-      : await resolveLocation(locationInput.value.trim());
+    const resolvedOrigin = search.detectedOrigin || (await resolveLocation(search.location));
     const lowerBound = Math.max(0, desiredDistance - margin);
     const upperBound = desiredDistance + margin;
 
     statusElement.textContent = 'Searching for matching cities...';
 
-    const matches = [];
-    for (const city of cities) {
-      if (city[POPULATION_INDEX] < minPopulation) {
-        continue;
-      }
-      const distance = haversineMiles(
-        resolvedOrigin.latitude,
-        resolvedOrigin.longitude,
-        city[LATITUDE_INDEX],
-        city[LONGITUDE_INDEX],
-      );
-      if (distance >= lowerBound && distance <= upperBound) {
-        matches.push({ city, distance });
-      }
-    }
-
-    matches.sort((left, right) => right.city[POPULATION_INDEX] - left.city[POPULATION_INDEX]);
+    const matches = findCitiesInRing(cities, resolvedOrigin, lowerBound, upperBound, minPopulation);
     renderResults(matches, resolvedOrigin, lowerBound, upperBound);
+    saveSearchToUrl(search);
     statusElement.textContent = `Search complete. Found ${matches.length} matching ${matches.length === 1 ? 'city' : 'cities'}.`;
   } catch (error) {
     statusElement.textContent = '';
     resultsPanel.hidden = true;
     errorElement.textContent = error.message || 'Unable to complete the search.';
   } finally {
+    searchInProgress = false;
     submitButton.disabled = false;
   }
 });
+
+// Keeps the current search in the address bar so it can be bookmarked or shared.
+function saveSearchToUrl(search) {
+  const queryString = searchToQueryString({
+    location: search.location,
+    distance: formatUrlNumber(search.distance),
+    margin: formatUrlNumber(search.margin),
+    minPopulation: formatUrlNumber(search.minPopulation),
+    unit: search.unit,
+  });
+  window.history.replaceState(null, '', `${window.location.pathname}?${queryString}`);
+}
+
+function runSearchFromUrl() {
+  const search = searchFromQueryString(window.location.search);
+  if (!search) {
+    return;
+  }
+
+  if (search.unit) {
+    setUnit(search.unit);
+  }
+  locationInput.value = search.location;
+  distanceInput.value = search.distance;
+  if (search.margin) {
+    marginInput.value = search.margin;
+  }
+  if (search.minPopulation) {
+    minPopulationInput.value = search.minPopulation;
+  }
+
+  // requestSubmit() fails silently when a value passes the link parser but not the form's own checks.
+  if (!form.checkValidity()) {
+    errorElement.textContent = 'This link has invalid search values. Check the form and search again.';
+    return;
+  }
+  // Safari before 16 lacks requestSubmit(); dispatching the event runs the same handler.
+  if (form.requestSubmit) {
+    form.requestSubmit();
+  } else {
+    form.dispatchEvent(new Event('submit', { cancelable: true }));
+  }
+}
+
+// Unit switches show a rounded value; while the field still shows it, use the exact value instead.
+function readDistanceInput(input, label) {
+  if (input.dataset.exactValue !== undefined && input.value === input.dataset.shownValue) {
+    return Number(input.dataset.exactValue);
+  }
+  return parseNumber(input.value, label);
+}
+
+// Up to six decimals keeps exact unit conversions without long float tails in the URL.
+function formatUrlNumber(value) {
+  return String(Number(value.toFixed(6)));
+}
 
 function clearDetectedLocation() {
   detectedLocation = null;
@@ -314,111 +435,6 @@ async function resolveLocation(input) {
   };
 }
 
-function parseCoordinates(input) {
-  const match = input.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
-  if (!match) {
-    return null;
-  }
-
-  const latitude = Number.parseFloat(match[1]);
-  const longitude = Number.parseFloat(match[2]);
-  if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
-    throw new Error('Coordinates must be within valid latitude and longitude ranges.');
-  }
-
-  return { latitude, longitude };
-}
-
-function looksLikeCoordinates(input) {
-  return /^\s*-?\d+(?:\.\d+)?\s*,\s*-?\d*(?:\.\d+)?\s*$/.test(input);
-}
-
-function buildCitySearchIndex(cities) {
-  const entriesByLabel = new Map();
-
-  for (const city of cities) {
-    const cityName = city[CITY_NAME_INDEX];
-    const countryCode = city[COUNTRY_INDEX];
-    const label = `${cityName}, ${countryCode}`;
-    const entry = entriesByLabel.get(label);
-
-    if (entry && entry.population >= city[POPULATION_INDEX]) {
-      continue;
-    }
-
-    entriesByLabel.set(label, {
-      label,
-      population: city[POPULATION_INDEX],
-      latitude: city[LATITUDE_INDEX],
-      longitude: city[LONGITUDE_INDEX],
-      normalizedCityName: normalizeText(cityName),
-      normalizedCountry: normalizeText(countryCode),
-      normalizedLabel: normalizeText(label),
-    });
-  }
-
-  const entries = Array.from(entriesByLabel.values());
-  const buckets = new Map();
-
-  for (const entry of entries) {
-    const prefixes = collectSearchPrefixes(entry);
-    for (const prefix of prefixes) {
-      const bucket = buckets.get(prefix);
-      if (bucket) {
-        bucket.push(entry);
-      } else {
-        buckets.set(prefix, [entry]);
-      }
-    }
-  }
-
-  return { entries, buckets };
-}
-
-function collectSearchPrefixes(entry) {
-  const prefixes = new Set();
-  const addPrefixes = (value) => {
-    for (let length = 1; length <= Math.min(3, value.length); length += 1) {
-      prefixes.add(value.slice(0, length));
-    }
-  };
-
-  addPrefixes(entry.normalizedCityName);
-  addPrefixes(entry.normalizedCountry);
-
-  for (const token of entry.normalizedCityName.split(/\s+/)) {
-    addPrefixes(token);
-  }
-
-  return prefixes;
-}
-
-function findCitySuggestions(input, citySearchIndex, limit = 1) {
-  return findRankedCitySuggestions(input, citySearchIndex, limit).map((suggestion) => suggestion.entry);
-}
-
-function findRankedCitySuggestions(input, citySearchIndex, limit) {
-  const { normalizedQuery, normalizedCountry } = parseLocationQuery(input);
-  if (!normalizedQuery) {
-    return [];
-  }
-
-  const bucketKey = normalizedQuery.slice(0, Math.min(3, normalizedQuery.length));
-  const candidates = citySearchIndex.buckets.get(bucketKey) || citySearchIndex.entries;
-  const suggestions = [];
-
-  for (const entry of candidates) {
-    const score = scoreCityMatch(entry, normalizedQuery, normalizedCountry);
-    if (!Number.isFinite(score)) {
-      continue;
-    }
-
-    insertRankedSuggestion(suggestions, entry, score, limit);
-  }
-
-  return suggestions;
-}
-
 // Looks in the large-city index first and only loads the full dataset when that finds no exact name match.
 async function findLocalCityMatch(input) {
   let [best] = findRankedCitySuggestions(input, await loadCitySearchIndex('large'), 1);
@@ -440,108 +456,19 @@ async function findLocalCityMatch(input) {
   };
 }
 
-function parseLocationQuery(input) {
-  const [namePart, ...countryParts] = input
-    .split(',')
-    .map((part) => part.trim())
-    .filter(Boolean);
-
-  return {
-    normalizedQuery: normalizeText(namePart || input),
-    normalizedCountry: normalizeText(countryParts.join(' ')),
-  };
-}
-
-function scoreCityMatch(entry, normalizedQuery, normalizedCountry) {
-  let score = Number.POSITIVE_INFINITY;
-
-  if (entry.normalizedCityName === normalizedQuery) {
-    score = 0;
-  } else if (entry.normalizedLabel === normalizeText(`${normalizedQuery}, ${normalizedCountry}`)) {
-    score = 0;
-  } else if (entry.normalizedCityName.startsWith(normalizedQuery)) {
-    score = 1;
-  } else if (entry.normalizedCityName.includes(` ${normalizedQuery}`)) {
-    score = 2;
-  } else if (entry.normalizedLabel.startsWith(normalizedQuery)) {
-    score = 3;
-  } else if (
-    entry.normalizedLabel.includes(` ${normalizedQuery}`) ||
-    entry.normalizedLabel.includes(`, ${normalizedQuery}`)
-  ) {
-    score = 4;
-  }
-
-  if (!Number.isFinite(score)) {
-    return score;
-  }
-
-  if (!normalizedCountry) {
-    return score;
-  }
-
-  if (entry.normalizedCountry === normalizedCountry) {
-    return score - 0.5;
-  }
-
-  if (entry.normalizedCountry.startsWith(normalizedCountry)) {
-    return score + 0.25;
-  }
-
-  return Number.POSITIVE_INFINITY;
-}
-
-function insertRankedSuggestion(suggestions, entry, score, limit) {
-  const candidate = { entry, score };
-  let index = suggestions.findIndex((suggestion) => compareRankedSuggestions(candidate, suggestion) < 0);
-
-  if (index === -1) {
-    index = suggestions.length;
-  }
-
-  suggestions.splice(index, 0, candidate);
-
-  if (suggestions.length > limit) {
-    suggestions.length = limit;
-  }
-}
-
-function compareRankedSuggestions(left, right) {
-  if (left.score !== right.score) {
-    return left.score - right.score;
-  }
-
-  if (left.entry.population !== right.entry.population) {
-    return right.entry.population - left.entry.population;
-  }
-
-  return left.entry.label.localeCompare(right.entry.label);
-}
-
-function haversineMiles(latitudeA, longitudeA, latitudeB, longitudeB) {
-  const latitudeDelta = toRadians(latitudeB - latitudeA);
-  const longitudeDelta = toRadians(longitudeB - longitudeA);
-  const latitudeARadians = toRadians(latitudeA);
-  const latitudeBRadians = toRadians(latitudeB);
-
-  const a =
-    Math.sin(latitudeDelta / 2) ** 2 +
-    Math.cos(latitudeARadians) * Math.cos(latitudeBRadians) * Math.sin(longitudeDelta / 2) ** 2;
-
-  return 2 * EARTH_RADIUS_MILES * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function toRadians(value) {
-  return (value * Math.PI) / 180;
-}
-
-function toDegrees(value) {
-  return (value * 180) / Math.PI;
-}
-
 function renderResults(matches, origin, lowerBound, upperBound) {
   resultsPanel.hidden = false;
-  currentResults = { matches, origin, lowerBound, upperBound, shown: 0 };
+  currentResults = {
+    matches,
+    sortedMatches: matches,
+    sortKey: 'population',
+    sortDirection: 'descending',
+    origin,
+    lowerBound,
+    upperBound,
+    shown: 0,
+  };
+  updateSortHeaders();
   resultsBody.innerHTML = '';
 
   if (matches.length === 0) {
@@ -556,20 +483,24 @@ function renderResults(matches, origin, lowerBound, upperBound) {
   renderResultsMap(matches.slice(0, 5), origin, lowerBound, upperBound);
 }
 
+// Redraws the visible results, e.g. after the distance unit changes.
+function rerenderResults() {
+  const { matches, origin, lowerBound, upperBound, shown } = currentResults;
+  updateResultsSummary();
+  if (matches.length === 0) {
+    return;
+  }
+
+  resultsBody.innerHTML = buildResultRows(currentResults.sortedMatches.slice(0, shown));
+  renderResultsMap(matches.slice(0, 5), origin, lowerBound, upperBound);
+}
+
 // Appends the next page of rows so very large result sets stay responsive.
 function showMoreResults() {
-  const { matches, shown } = currentResults;
+  const { sortedMatches: matches, shown } = currentResults;
   const nextPage = matches.slice(shown, shown + RESULTS_PAGE_SIZE);
-  const rows = nextPage.map(({ city, distance }) => `
-    <tr>
-      <td>${escapeHtml(city[CITY_NAME_INDEX])}</td>
-      <td>${escapeHtml(city[COUNTRY_INDEX])}</td>
-      <td>${populationFormatter.format(city[POPULATION_INDEX])}</td>
-      <td>${distanceFormatter.format(distance)}</td>
-    </tr>
-  `);
 
-  resultsBody.insertAdjacentHTML('beforeend', rows.join(''));
+  resultsBody.insertAdjacentHTML('beforeend', buildResultRows(nextPage));
   currentResults.shown += nextPage.length;
 
   const remaining = matches.length - currentResults.shown;
@@ -578,11 +509,95 @@ function showMoreResults() {
   updateResultsSummary();
 }
 
+// Re-sorts the table, keeping the same number of rows visible. Clicking the active column reverses it.
+function sortResults(sortKey) {
+  if (currentResults.matches.length === 0) {
+    return;
+  }
+
+  const sortDirection =
+    currentResults.sortKey === sortKey
+      ? currentResults.sortDirection === 'ascending'
+        ? 'descending'
+        : 'ascending'
+      : SORT_KEYS[sortKey].defaultDirection;
+
+  Object.assign(currentResults, {
+    sortKey,
+    sortDirection,
+    sortedMatches: sortMatches(currentResults.matches, sortKey, sortDirection),
+  });
+  updateSortHeaders();
+  resultsBody.innerHTML = buildResultRows(currentResults.sortedMatches.slice(0, currentResults.shown));
+  updateResultsSummary();
+  const columnName = document.querySelector(`th[data-sort-key="${sortKey}"] .sort-button`).textContent.trim();
+  statusElement.textContent = `Sorted by ${columnName.toLowerCase()}, ${sortDirection}.`;
+}
+
+function updateSortHeaders() {
+  sortHeaders.forEach((header) => {
+    if (header.dataset.sortKey === currentResults.sortKey) {
+      header.setAttribute('aria-sort', currentResults.sortDirection);
+    } else {
+      header.removeAttribute('aria-sort');
+    }
+  });
+}
+
+function buildResultRows(matches) {
+  return matches
+    .map(({ city, distance }) => `
+      <tr>
+        <td>${escapeHtml(city[CITY_NAME_INDEX])}</td>
+        <td>${escapeHtml(city[COUNTRY_INDEX])}</td>
+        <td>${populationFormatter.format(city[POPULATION_INDEX])}</td>
+        <td>${formatDistanceValue(distance)}</td>
+      </tr>
+    `)
+    .join('');
+}
+
 function updateResultsSummary() {
-  const { matches, origin, lowerBound, upperBound, shown } = currentResults;
+  const { matches, origin, lowerBound, upperBound, shown, sortKey } = currentResults;
   const count = `${populationFormatter.format(matches.length)} ${matches.length === 1 ? 'city' : 'cities'}`;
-  const partial = shown < matches.length ? ` Showing the largest ${populationFormatter.format(shown)}.` : '';
-  resultsSummary.textContent = `${count} between ${distanceFormatter.format(lowerBound)} and ${distanceFormatter.format(upperBound)} miles from ${origin.label}.${partial}`;
+  const which = sortKey === 'population' && currentResults.sortDirection === 'descending' ? 'largest' : 'first';
+  const partial = shown < matches.length ? ` Showing the ${which} ${populationFormatter.format(shown)}.` : '';
+  resultsSummary.textContent = `${count} between ${formatDistanceValue(lowerBound)} and ${formatDistanceValue(upperBound)} ${DISTANCE_UNITS[currentUnit].name} from ${origin.label}.${partial}`;
+}
+
+function formatDistanceValue(miles) {
+  return distanceFormatter.format(fromMiles(miles, currentUnit));
+}
+
+function formatDistance(miles) {
+  return `${formatDistanceValue(miles)} ${currentUnit}`;
+}
+
+function setUnit(unit) {
+  currentUnit = isDistanceUnit(unit) ? unit : DEFAULT_UNIT;
+  unitSelect.value = currentUnit;
+  document.querySelectorAll('.unit-name').forEach((element) => {
+    element.textContent = DISTANCE_UNITS[currentUnit].name;
+  });
+  document.querySelectorAll('.unit-label').forEach((element) => {
+    element.textContent = currentUnit;
+  });
+}
+
+function loadSavedUnit() {
+  try {
+    return localStorage.getItem(UNIT_STORAGE_KEY) || DEFAULT_UNIT;
+  } catch {
+    return DEFAULT_UNIT;
+  }
+}
+
+function saveUnit(unit) {
+  try {
+    localStorage.setItem(UNIT_STORAGE_KEY, unit);
+  } catch {
+    // Storage can be unavailable (e.g. private browsing); the choice just won't persist.
+  }
 }
 
 function renderResultsMap(topMatches, origin, lowerBound, upperBound) {
@@ -605,7 +620,7 @@ function renderResultsMap(topMatches, origin, lowerBound, upperBound) {
     ...topMatches.map(({ city, distance }, index) => `
       <li class="map-legend-item">
         <span class="map-legend-rank" aria-hidden="true">${index + 1}</span>
-        <span>${escapeHtml(city[CITY_NAME_INDEX])}, ${escapeHtml(city[COUNTRY_INDEX])} · Pop. ${populationFormatter.format(city[POPULATION_INDEX])} · ${distanceFormatter.format(distance)} mi</span>
+        <span>${escapeHtml(city[CITY_NAME_INDEX])}, ${escapeHtml(city[COUNTRY_INDEX])} · Pop. ${populationFormatter.format(city[POPULATION_INDEX])} · ${formatDistance(distance)}</span>
       </li>
     `),
   ];
@@ -653,7 +668,7 @@ function renderResultsMap(topMatches, origin, lowerBound, upperBound) {
       .bindPopup(`
         <strong>#${rank} ${escapeHtml(city[CITY_NAME_INDEX])}, ${escapeHtml(city[COUNTRY_INDEX])}</strong><br />
         Population ${populationFormatter.format(city[POPULATION_INDEX])}<br />
-        ${distanceFormatter.format(distance)} miles away
+        ${formatDistanceValue(distance)} ${DISTANCE_UNITS[currentUnit].name} away
       `)
       .addTo(resultsMap);
   });
@@ -663,13 +678,12 @@ function renderResultsMap(topMatches, origin, lowerBound, upperBound) {
 
 // Shades the band between the lower and upper search distances, following great circles.
 function drawDistanceRing(origin, lowerBound, upperBound) {
-  const ringStyle = { color: '#1d4ed8', weight: 1.5, dashArray: '6 6', fillColor: '#60a5fa', fillOpacity: 0.12 };
+  const ringColor = getComputedStyle(document.documentElement).getPropertyValue('--origin').trim() || '#1d4ed8';
+  const ringStyle = { color: ringColor, weight: 1.5, dashArray: '6 6', fillColor: '#60a5fa', fillOpacity: 0.12 };
   const outerRing = buildDistanceRing(origin, upperBound);
   const innerRing = lowerBound > 0 ? buildDistanceRing(origin, lowerBound) : null;
-  const milesToNorthPole = EARTH_RADIUS_MILES * toRadians(90 - origin.latitude);
-  const milesToSouthPole = EARTH_RADIUS_MILES * toRadians(90 + origin.latitude);
 
-  if (upperBound < Math.min(milesToNorthPole, milesToSouthPole)) {
+  if (!ringEnclosesPole(origin, upperBound)) {
     L.polygon(innerRing ? [outerRing, innerRing] : outerRing, ringStyle).addTo(resultsMap);
     return;
   }
@@ -678,36 +692,6 @@ function drawDistanceRing(origin, lowerBound, upperBound) {
   [outerRing, innerRing].filter(Boolean).forEach((ring) => {
     L.polyline(ring, { ...ringStyle, fill: false }).addTo(resultsMap);
   });
-}
-
-function buildDistanceRing(origin, distanceMiles) {
-  const angularDistance = distanceMiles / EARTH_RADIUS_MILES;
-  const latitude = toRadians(origin.latitude);
-  const longitude = toRadians(origin.longitude);
-  const points = [];
-  let previousLongitude = origin.longitude;
-
-  for (let step = 0; step <= RING_SEGMENTS; step += 1) {
-    const bearing = (step / RING_SEGMENTS) * 2 * Math.PI;
-    const pointLatitude = Math.asin(
-      Math.sin(latitude) * Math.cos(angularDistance) +
-        Math.cos(latitude) * Math.sin(angularDistance) * Math.cos(bearing),
-    );
-    const pointLongitude =
-      longitude +
-      Math.atan2(
-        Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(latitude),
-        Math.cos(angularDistance) - Math.sin(latitude) * Math.sin(pointLatitude),
-      );
-    // Unwrap each point relative to the previous one so the ring never jumps across the map.
-    previousLongitude = unwrapLongitude(toDegrees(pointLongitude), previousLongitude);
-    points.push([toDegrees(pointLatitude), previousLongitude]);
-  }
-
-  // A ring around a pole spans every longitude, so shift it by whole turns to center it on the origin.
-  const meanLongitude = points.reduce((sum, [, pointLongitude]) => sum + pointLongitude, 0) / points.length;
-  const shift = 360 * Math.round((origin.longitude - meanLongitude) / 360);
-  return points.map(([pointLatitude, pointLongitude]) => [pointLatitude, pointLongitude + shift]);
 }
 
 function destroyResultsMap() {
@@ -724,14 +708,6 @@ function hideResultsMap() {
   resultsMapElement.innerHTML = '';
 }
 
-function unwrapLongitude(longitude, referenceLongitude) {
-  return referenceLongitude + normalizeLongitude(longitude - referenceLongitude);
-}
-
-function normalizeLongitude(value) {
-  return ((((value + 180) % 360) + 360) % 360) - 180;
-}
-
 function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -741,10 +717,4 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-function normalizeText(value) {
-  return String(value)
-    .normalize('NFD')
-    .replaceAll(/\p{Diacritic}/gu, '')
-    .toLowerCase()
-    .trim();
-}
+runSearchFromUrl();

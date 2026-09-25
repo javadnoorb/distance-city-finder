@@ -36,12 +36,20 @@
 
           <div class="field-row">
             <label>
-              <span>Desired distance (miles)</span>
+              <span>Units</span>
+              <select id="unit" name="unit">
+                <option value="mi">Miles</option>
+                <option value="km">Kilometers</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Desired distance (<span class="unit-name">miles</span>)</span>
               <input id="distance" name="distance" type="number" min="0" step="any" required />
             </label>
 
             <label>
-              <span>Margin of error (miles)</span>
+              <span>Margin of error (<span class="unit-name">miles</span>)</span>
               <input
                 id="margin"
                 name="margin"
@@ -78,6 +86,7 @@
         <div class="results-header">
           <h2>Matching cities</h2>
           <p id="results-summary"></p>
+          <button id="copy-link" type="button" class="secondary-button copy-link-button">Copy link</button>
         </div>
         <section id="results-map-section" class="results-map-section" hidden>
           <div class="results-map-header">
@@ -95,10 +104,14 @@
           <table aria-label="Cities matching the selected distance ring">
             <thead>
               <tr>
-                <th>City</th>
-                <th>Country</th>
-                <th>Population</th>
-                <th>Distance (mi)</th>
+                <th data-sort-key="name"><button type="button" class="sort-button">City</button></th>
+                <th data-sort-key="country"><button type="button" class="sort-button">Country</button></th>
+                <th data-sort-key="population" aria-sort="descending">
+                  <button type="button" class="sort-button">Population</button>
+                </th>
+                <th data-sort-key="distance">
+                  <button type="button" class="sort-button"><span>Distance (<span class="unit-label">mi</span>)</span></button>
+                </th>
               </tr>
             </thead>
             <tbody id="results-body"></tbody>
@@ -109,6 +122,6 @@
     </main>
 
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script src="app.js"></script>
+    <script type="module" src="app.js"></script>
   </body>
 </html>
